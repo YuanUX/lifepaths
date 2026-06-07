@@ -8,7 +8,7 @@ Map out goals, break them into subtasks, drop in milestones, and watch your prog
 
 🔗 **[Try it live → lifepaths.work](https://lifepaths.work/)**
 
-<img src="docs/images/demo.gif" alt="LifePaths.work demo" width="100%" />
+<img src="docs/images/high-res-demo.gif" alt="LifePaths.work demo" width="100%" />
 
 </div>
 
