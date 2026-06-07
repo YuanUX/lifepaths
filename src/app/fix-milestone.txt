@@ -1,0 +1,9 @@
+Line 1229 current:
+                                <span className="text-[10px] font-bold text-slate-600 whitespace-nowrap px-1.5 py-0.5 rounded bg-white/80 backdrop-blur-sm border border-slate-100 shadow-sm opacity-90 group-hover:opacity-100">
+
+Line 1229 replacement:
+                                <MilestoneLabel title={m.title} milestoneX={left} todayX={todayPx} />
+
+Lines 1230-1231 to delete:
+                                  {m.title}
+                                </span>

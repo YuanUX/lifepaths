@@ -1,0 +1,14 @@
+name = "lifepath-api"
+main = "src/index.ts"
+compatibility_date = "2024-01-01"
+account_id = "e148dc4ee04d9533ca776e6a0d4706b2"
+
+# D1 Database
+[[d1_databases]]
+binding = "DB"
+database_name = "lifepath"
+database_id = "34ebb2b1-7c31-4d99-8d4e-17218b1ec960"
+
+# AI Binding
+[ai]
+binding = "AI"

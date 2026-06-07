@@ -1,0 +1,4 @@
+Line 1216 needs to change from:
+                            const topPos = 8; 
+to:
+                            const topPos = 16;
