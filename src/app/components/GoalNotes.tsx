@@ -1,6 +1,6 @@
 import React from 'react';
 import { Goal } from '../types';
-import * as DataService from '../services/dataService';
+import * as WorkersDataService from '../services/workersDataService';
 
 interface GoalNotesProps {
   goal: Goal;
@@ -61,7 +61,7 @@ export function GoalNotes({ goal, onUpdate, isDemoMode }: GoalNotesProps) {
         onChange={async (e) => {
           const updated = {...goal, notes: e.target.value};
           onUpdate(updated);
-          if (!isDemoMode) await DataService.updateGoal(updated);
+          if (!isDemoMode) await WorkersDataService.updateGoal(updated);
         }}
       />
     </div>

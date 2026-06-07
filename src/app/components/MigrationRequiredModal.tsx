@@ -8,26 +8,19 @@ interface MigrationRequiredModalProps {
 }
 
 const MIGRATION_SQL = `-- Add order column to subtasks table
-ALTER TABLE subtasks ADD COLUMN IF NOT EXISTS "order" INTEGER DEFAULT 0;
+ALTER TABLE subtasks ADD COLUMN "order" INTEGER NOT NULL DEFAULT 0;
 
 -- Create an index on order for better query performance
 CREATE INDEX IF NOT EXISTS idx_subtasks_order ON subtasks(goal_id, "order");
 
--- Update existing subtasks to have sequential order values
-WITH ordered_subtasks AS (
-  SELECT 
-    id,
-    ROW_NUMBER() OVER (PARTITION BY goal_id ORDER BY created_at) - 1 AS new_order
-  FROM subtasks
-  WHERE "order" = 0 OR "order" IS NULL
-)
+-- Give existing subtasks sequential order values within each goal
 UPDATE subtasks
-SET "order" = ordered_subtasks.new_order
-FROM ordered_subtasks
-WHERE subtasks.id = ordered_subtasks.id;
-
--- Make order NOT NULL now that all rows have values
-ALTER TABLE subtasks ALTER COLUMN "order" SET NOT NULL;`;
+SET "order" = (
+  SELECT COUNT(*)
+  FROM subtasks AS s
+  WHERE s.goal_id = subtasks.goal_id
+    AND s.created_at < subtasks.created_at
+);`;
 
 export function MigrationRequiredModal({ isOpen, onClose }: MigrationRequiredModalProps) {
   const [copied, setCopied] = useState(false);
@@ -79,11 +72,9 @@ export function MigrationRequiredModal({ isOpen, onClose }: MigrationRequiredMod
             <div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
               <h3 className="text-sm mb-2 text-blue-900 dark:text-blue-100">Steps to run the migration:</h3>
               <ol className="text-sm space-y-1 text-blue-800 dark:text-blue-200 list-decimal list-inside">
-                <li>Copy the SQL below</li>
-                <li>Go to your Supabase project dashboard</li>
-                <li>Click "SQL Editor" in the left sidebar</li>
-                <li>Click "New Query"</li>
-                <li>Paste and run the SQL (Cmd/Ctrl + Enter)</li>
+                <li>Copy the SQL below into a file (e.g. <code>migration.sql</code>)</li>
+                <li>From the <code>workers/</code> directory, run it against your D1 database:</li>
+                <li><code>npx wrangler d1 execute lifepath --remote --file=migration.sql</code></li>
                 <li>Refresh this page</li>
               </ol>
             </div>
@@ -129,13 +120,20 @@ export function MigrationRequiredModal({ isOpen, onClose }: MigrationRequiredMod
             I'll do this later
           </Button>
           <Button
-            onClick={() => {
-              handleCopy();
-              window.open('https://supabase.com/dashboard/project/_/sql/new', '_blank');
-            }}
+            onClick={handleCopy}
             className="gap-2"
           >
-            Copy & Open Supabase
+            {copied ? (
+              <>
+                <Check className="w-4 h-4" />
+                Copied!
+              </>
+            ) : (
+              <>
+                <Copy className="w-4 h-4" />
+                Copy SQL
+              </>
+            )}
           </Button>
         </div>
       </div>

@@ -2,7 +2,7 @@ import React from 'react';
 import { Trash2 } from './Icons';
 import { ColorPicker } from './ColorPicker';
 import { GlobalMilestone, GoalMilestone } from '../types';
-import * as DataService from '../services/dataService';
+import * as WorkersDataService from '../services/workersDataService';
 
 interface MilestoneEditorProps {
   milestone: GlobalMilestone | GoalMilestone;
@@ -27,7 +27,7 @@ export function MilestoneEditor({
       const m = milestone as GlobalMilestone;
       const updated = {...m, title: val};
       onUpdate(prev => ({...prev, globalMilestones: prev.globalMilestones.map(x => x.id === m.id ? updated : x)}));
-      if (!isDemoMode) await DataService.updateGlobalMilestone(updated);
+      if (!isDemoMode) await WorkersDataService.updateGlobalMilestone(updated);
     } else {
       const m = milestone as GoalMilestone;
       const gId = parentGoalId!;
@@ -35,7 +35,7 @@ export function MilestoneEditor({
         const newGoals = prev.goals.map(g => g.id === gId ? {...g, milestones: g.milestones.map(x => x.id === m.id ? {...x, title: val} : x)} : g);
         return {...prev, goals: newGoals};
       });
-      if (!isDemoMode) await DataService.updateGoalMilestone({...m, title: val});
+      if (!isDemoMode) await WorkersDataService.updateGoalMilestone({...m, title: val, goalId: gId});
     }
   };
 
@@ -44,7 +44,7 @@ export function MilestoneEditor({
       const m = milestone as GlobalMilestone;
       const updated = {...m, date: val};
       onUpdate(prev => ({...prev, globalMilestones: prev.globalMilestones.map(x => x.id === m.id ? updated : x)}));
-      if (!isDemoMode) await DataService.updateGlobalMilestone(updated);
+      if (!isDemoMode) await WorkersDataService.updateGlobalMilestone(updated);
     } else {
       const m = milestone as GoalMilestone;
       const gId = parentGoalId!;
@@ -52,7 +52,7 @@ export function MilestoneEditor({
         const newGoals = prev.goals.map(g => g.id === gId ? {...g, milestones: g.milestones.map(x => x.id === m.id ? {...x, date: val} : x)} : g);
         return {...prev, goals: newGoals};
       });
-      if (!isDemoMode) await DataService.updateGoalMilestone({...m, date: val});
+      if (!isDemoMode) await WorkersDataService.updateGoalMilestone({...m, date: val, goalId: gId});
     }
   };
 
@@ -61,7 +61,7 @@ export function MilestoneEditor({
       const m = milestone as GlobalMilestone;
       const updated = {...m, color};
       onUpdate(prev => ({...prev, globalMilestones: prev.globalMilestones.map(x => x.id === m.id ? updated : x)}));
-      if (!isDemoMode) await DataService.updateGlobalMilestone(updated);
+      if (!isDemoMode) await WorkersDataService.updateGlobalMilestone(updated);
     } else {
       const m = milestone as GoalMilestone;
       const gId = parentGoalId!;
@@ -69,7 +69,7 @@ export function MilestoneEditor({
         const newGoals = prev.goals.map(g => g.id === gId ? {...g, milestones: g.milestones.map(x => x.id === m.id ? {...x, color} : x)} : g);
         return {...prev, goals: newGoals};
       });
-      if (!isDemoMode) await DataService.updateGoalMilestone({...m, color});
+      if (!isDemoMode) await WorkersDataService.updateGoalMilestone({...m, color, goalId: gId});
     }
   };
 
@@ -80,14 +80,14 @@ export function MilestoneEditor({
     
     if (isGlobal) {
       onUpdate(prev => ({...prev, globalMilestones: prev.globalMilestones.filter(m => m.id !== msId)}));
-      if (!isDemoMode) await DataService.deleteGlobalMilestone(msId);
+      if (!isDemoMode) await WorkersDataService.deleteGlobalMilestone(msId);
     } else {
       const gId = parentGoalId!;
       onUpdate(prev => ({
         ...prev, 
         goals: prev.goals.map(g => g.id === gId ? {...g, milestones: g.milestones.filter(m => m.id !== msId)} : g)
       }));
-      if (!isDemoMode) await DataService.deleteGoalMilestone(msId);
+      if (!isDemoMode) await WorkersDataService.deleteGoalMilestone(msId);
     }
     onClose();
   };

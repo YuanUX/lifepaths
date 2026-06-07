@@ -66,6 +66,4 @@ Copy `.env.example` to `.env` and fill in:
 | Variable | Description |
 |----------|-------------|
 | `VITE_WORKERS_API_URL` | URL of your deployed Cloudflare Worker API |
-| `VITE_SUPABASE_URL` | Supabase project URL |
-| `VITE_SUPABASE_ANON_KEY` | Supabase anonymous (public) key |
 </content>
