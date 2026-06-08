@@ -133,10 +133,10 @@ npx wrangler pages create lifepath
 npx wrangler pages deploy dist
 ```
 
-**Copy your Pages URL!** It looks like:
+**Copy your Pages URL!** Cloudflare may append a suffix if `lifepath` is taken, so the actual subdomain can differ:
 ```
 ✨ Deployment complete! Visit your site at:
-  https://lifepath.pages.dev
+  https://lifepath-47w.pages.dev
 ```
 
 ### 4.4 Set Environment Variable
@@ -157,7 +157,7 @@ npx wrangler pages deploy dist
 ## Done! 🎉
 
 Your app is now live at:
-- Frontend: `https://lifepath.pages.dev`
+- Frontend: `https://lifepath-47w.pages.dev`
 - Backend: `https://lifepath-api.your-name.workers.dev`
 
 ## Managing Your Database
