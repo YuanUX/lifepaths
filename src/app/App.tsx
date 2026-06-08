@@ -409,7 +409,7 @@ export default function App() {
           else if (type === 'milestone-move') {
             const goal = data.goals.find(g => g.id === parentId);
             const milestone = goal?.milestones.find(m => m.id === itemId);
-            if (milestone) await WorkersDataService.updateGoalMilestone(milestone);
+            if (milestone) await WorkersDataService.updateGoalMilestone({ ...milestone, goalId: parentId });
           }
           else if (type === 'global-milestone-move') {
             const milestone = data.globalMilestones.find(m => m.id === itemId);
@@ -458,7 +458,7 @@ export default function App() {
       
       // Save all goal milestones
       for (const goal of data.goals) {
-        await Promise.all(goal.milestones.map(milestone => WorkersDataService.updateGoalMilestone(milestone)));
+        await Promise.all(goal.milestones.map(milestone => WorkersDataService.updateGoalMilestone({ ...milestone, goalId: goal.id })));
       }
       
       // Save all global milestones
