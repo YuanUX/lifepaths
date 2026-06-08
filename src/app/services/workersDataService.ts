@@ -1,6 +1,57 @@
 import { Goal, Subtask, GoalMilestone, GlobalMilestone, UserProfile, AppState, Status } from '../types';
 import * as WorkersClient from './workersClient';
 
+// --- Save status tracking ---
+// The app auto-saves every change. Rather than guess "changed since load",
+// we track real persistence state so the UI can show Saving / Saved / failed
+// and warn before unload if a save is in flight or failed.
+export type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+
+let pending = 0;
+let saveState: SaveState = 'idle';
+let lastError: unknown = null;
+const listeners = new Set<() => void>();
+
+function emit() {
+  for (const l of listeners) l();
+}
+
+export function subscribeSaveStatus(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => { listeners.delete(listener); };
+}
+
+export function getSaveState(): SaveState {
+  return saveState;
+}
+
+export function getSaveError(): unknown {
+  return lastError;
+}
+
+// Wrap a save operation so its in-flight/success/failure updates global status.
+function trackSave<T>(op: Promise<T>): Promise<T> {
+  pending++;
+  saveState = 'saving';
+  lastError = null;
+  emit();
+  return op.then(
+    (result) => {
+      pending = Math.max(0, pending - 1);
+      if (pending === 0) saveState = 'saved';
+      emit();
+      return result;
+    },
+    (err) => {
+      pending = Math.max(0, pending - 1);
+      saveState = 'error';
+      lastError = err;
+      emit();
+      throw err;
+    },
+  );
+}
+
 function mapDBGoal(g: any): Goal {
   return {
     id: g.id,
@@ -55,7 +106,7 @@ export async function fetchAppData(userId: string): Promise<AppState | null> {
 }
 
 export async function updateUserProfile(userId: string, profile: UserProfile) {
-  return WorkersClient.userProfile.update(profile.xp, profile.level, profile.nextLevelXp);
+  return trackSave(WorkersClient.userProfile.update(profile.xp, profile.level, profile.nextLevelXp));
 }
 
 export async function createGoal(userId: string, goal: Goal) {
@@ -85,11 +136,11 @@ export async function createGoal(userId: string, goal: Goal) {
       color: m.color,
     })),
   };
-  return WorkersClient.goals.create(payload);
+  return trackSave(WorkersClient.goals.create(payload));
 }
 
 export async function updateGoal(goal: Goal) {
-  return WorkersClient.goals.update({
+  return trackSave(WorkersClient.goals.update({
     id: goal.id,
     title: goal.title,
     category: goal.category,
@@ -99,45 +150,45 @@ export async function updateGoal(goal: Goal) {
     status: goal.status === Status.IN_PROGRESS ? 'in-progress' : goal.status === Status.DONE ? 'completed' : 'todo',
     order: goal.order,
     notes: goal.notes || '',
-  });
+  }));
 }
 
 export async function deleteGoal(goalId: string) {
-  return WorkersClient.goals.delete(goalId);
+  return trackSave(WorkersClient.goals.delete(goalId));
 }
 
 export async function createSubtask(subtask: Subtask & { goalId: string }) {
-  return WorkersClient.subtasks.create(subtask);
+  return trackSave(WorkersClient.subtasks.create(subtask));
 }
 
 export async function updateSubtask(subtask: Subtask) {
-  return WorkersClient.subtasks.update(subtask);
+  return trackSave(WorkersClient.subtasks.update(subtask));
 }
 
 export async function deleteSubtask(subtaskId: string) {
-  return WorkersClient.subtasks.delete(subtaskId);
+  return trackSave(WorkersClient.subtasks.delete(subtaskId));
 }
 
 export async function createGlobalMilestone(userId: string, milestone: GlobalMilestone) {
-  return WorkersClient.globalMilestones.create({ ...milestone, userId });
+  return trackSave(WorkersClient.globalMilestones.create({ ...milestone, userId }));
 }
 
 export async function updateGlobalMilestone(milestone: GlobalMilestone) {
-  return WorkersClient.globalMilestones.update(milestone);
+  return trackSave(WorkersClient.globalMilestones.update(milestone));
 }
 
 export async function deleteGlobalMilestone(milestoneId: string) {
-  return WorkersClient.globalMilestones.delete(milestoneId);
+  return trackSave(WorkersClient.globalMilestones.delete(milestoneId));
 }
 
 export async function createGoalMilestone(goalId: string, milestone: GoalMilestone) {
-  return WorkersClient.goalMilestones.create({ ...milestone, goalId });
+  return trackSave(WorkersClient.goalMilestones.create({ ...milestone, goalId }));
 }
 
 export async function updateGoalMilestone(milestone: GoalMilestone & { goalId: string }) {
-  return WorkersClient.goalMilestones.update(milestone);
+  return trackSave(WorkersClient.goalMilestones.update(milestone));
 }
 
 export async function deleteGoalMilestone(milestoneId: string) {
-  return WorkersClient.goalMilestones.delete(milestoneId);
+  return trackSave(WorkersClient.goalMilestones.delete(milestoneId));
 }

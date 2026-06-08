@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useSyncExternalStore } from 'react';
 import {
   ChevronRight, ChevronDown, Plus, Calendar,
   Flag, Trash2, Download, Wand2,
@@ -117,9 +117,8 @@ export default function App() {
   const [aiSuggestions, setAiSuggestions] = useState<AISuggestion[]>([]);
   const [isAiLoading, setIsAiLoading] = useState(false);
 
-  // Save state
-  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
+  // Save state — reflects real persistence status (the app auto-saves every change)
+  const saveState = useSyncExternalStore(WorkersDataService.subscribeSaveStatus, WorkersDataService.getSaveState);
 
   // Refs for synced scrolling
   const timelineScrollRef = useRef<HTMLDivElement>(null);
@@ -435,47 +434,19 @@ export default function App() {
     };
   }, [dragState, data, session, isDemoMode, pxPerDay]);
 
-  // Track unsaved changes
+  // Warn before leaving only if a save is still in flight or the last one failed —
+  // i.e. there really is data at risk. (Changes auto-save, so a clean state is safe.)
   useEffect(() => {
-    if (isDemoMode || !session || isLoading) return;
-    setHasUnsavedChanges(true);
-  }, [data]);
+    if (saveState !== 'saving' && saveState !== 'error') return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [saveState]);
 
   // -- Logic Helpers --
-
-  const handleSaveAll = async () => {
-    if (isDemoMode || !session || isSaving) return;
-    
-    setIsSaving(true);
-    try {
-      // Save all goals
-      await Promise.all(data.goals.map(goal => WorkersDataService.updateGoal(goal)));
-      
-      // Save all subtasks
-      for (const goal of data.goals) {
-        await Promise.all(goal.subtasks.map(subtask => WorkersDataService.updateSubtask(subtask)));
-      }
-      
-      // Save all goal milestones
-      for (const goal of data.goals) {
-        await Promise.all(goal.milestones.map(milestone => WorkersDataService.updateGoalMilestone({ ...milestone, goalId: goal.id })));
-      }
-      
-      // Save all global milestones
-      await Promise.all(data.globalMilestones.map(milestone => WorkersDataService.updateGlobalMilestone(milestone)));
-      
-      // Save user profile
-      await WorkersDataService.updateUserProfile(session.user.id, data.user);
-      
-      setHasUnsavedChanges(false);
-      alert('✅ All changes saved!');
-    } catch (error) {
-      console.error('Error saving:', error);
-      alert('❌ Error saving changes. Please try again.');
-    } finally {
-      setIsSaving(false);
-    }
-  };
 
   // -- Logic Helpers --
 
@@ -1060,26 +1031,26 @@ export default function App() {
                 Sign In
               </button>
             </div>
-          ) : session && (
+          ) : session && (saveState === 'saving' || saveState === 'error') && (
             <div className="p-4 bg-white border-t border-slate-200 shrink-0">
-              <button
-                onClick={handleSaveAll}
-                disabled={!hasUnsavedChanges || isSaving}
-                className={`w-full flex items-center justify-center gap-2 py-2.5 px-4 text-sm font-medium rounded-lg transition-all shadow-sm ${
-                  hasUnsavedChanges && !isSaving
-                    ? 'bg-indigo-600 text-white hover:bg-indigo-700 hover:shadow border border-indigo-700'
-                    : 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
+              <div
+                className={`w-full flex items-center justify-center gap-2 py-2.5 px-4 text-sm font-medium rounded-lg ${
+                  saveState === 'error'
+                    ? 'bg-red-50 text-red-700 border border-red-200'
+                    : 'bg-slate-50 text-slate-500 border border-slate-200'
                 }`}
-                title={hasUnsavedChanges ? 'Save all changes' : 'No changes to save'}
+                title={
+                  saveState === 'error'
+                    ? "Some changes couldn't be saved — check your connection"
+                    : 'Saving your changes…'
+                }
               >
-                {isSaving ? (
-                  <>Saving...</>
-                ) : hasUnsavedChanges ? (
-                  <>Save</>
+                {saveState === 'error' ? (
+                  <>⚠️ Couldn't save changes</>
                 ) : (
-                  <>Saved</>
+                  <>Saving…</>
                 )}
-              </button>
+              </div>
             </div>
           )}
         </aside>
