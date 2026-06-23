@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo, useSyncExternalStore } from 'react';
+import { useNavigate, useLocation } from 'react-router';
 import {
   ChevronRight, ChevronDown, Plus, Calendar,
   Flag, Trash2, Download, Wand2,
@@ -21,11 +22,18 @@ import {
 } from './types';
 import { 
   addDays, diffDays, formatDate, generateId, startOfDay,
-  parseLocalDate, getLevelInfo, CATEGORY_COLORS, generateICS 
+  parseLocalDate, getLevelInfo, CATEGORY_COLORS, generateICS, inferCategory
 } from './services/utils';
 import { getGoalBreakdown, AISuggestion } from './services/geminiService';
 import * as WorkersClient from './services/workersClient';
 import * as WorkersDataService from './services/workersDataService';
+
+// Short, human-friendly date for the drag tooltip, e.g. "Jun 23, 2026".
+const formatTooltipDate = (dateStr: string): string => {
+  const d = parseLocalDate(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+};
 
 // --- Constants & Initial Data ---
 const INITIAL_START_DATE = startOfDay(new Date());
@@ -39,6 +47,9 @@ const MILESTONE_TOP_POSITION = 16;
 const TIMELINE_PADDING_DAYS = 30;
 // Always render at least this many days, even for an empty/short timeline.
 const MIN_TIMELINE_DAYS = 200;
+// Don't nag trial users to save until they've spent at least this long exploring,
+// so the exit-intent prompt can't fire in the first moments of the session.
+const MIN_DEMO_DWELL_MS = 15000;
 
 const INITIAL_STATE: AppState = {
   user: { xp: 0, level: 1, nextLevelXp: 300 },
@@ -87,7 +98,20 @@ const DEMO_STATE: AppState = {
   ]
 };
 
+// Signature of the untouched demo seed, so we can tell when a trial user has
+// actually changed the plan (vs. just looking at the example quests).
+const DEMO_SEED_SIGNATURE = JSON.stringify({ goals: DEMO_STATE.goals, globalMilestones: DEMO_STATE.globalMilestones });
+
 export default function App() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  // The canvas lives at /app; everything else is the marketing landing page.
+  const onCanvasRoute = location.pathname.startsWith('/app');
+
+  // Preview mode (?preview=1): boot straight into the demo canvas with no chrome,
+  // so the landing page can embed it as a live, read-only iframe preview.
+  const isPreview = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('preview') === '1';
+
   // -- State --
   const [session, setSession] = useState<{ user: { id: string }; access_token: string } | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -97,7 +121,7 @@ export default function App() {
 
   const [data, setData] = useState<AppState>(INITIAL_STATE);
   const [dbError, setDbError] = useState<boolean>(false);
-  const [isDemoMode, setIsDemoMode] = useState(false);
+  const [isDemoMode, setIsDemoMode] = useState(isPreview);
   
   const [pxPerDay, setPxPerDay] = useState<number>(DEFAULT_PX_PER_DAY);
 
@@ -105,6 +129,10 @@ export default function App() {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  // Category for the create modal. Auto-inferred from the title keywords until
+  // the user manually changes it (questCategoryTouched), giving title -> type -> color.
+  const [questCategory, setQuestCategory] = useState(CATEGORY_COLORS[0].name);
+  const [questCategoryTouched, setQuestCategoryTouched] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => {
     // Default to closed on mobile (width < 768px)
     if (typeof window !== 'undefined') {
@@ -115,6 +143,17 @@ export default function App() {
   const [collapsedGoalIds, setCollapsedGoalIds] = useState<Set<string>>(new Set());
   const [showMigrationModal, setShowMigrationModal] = useState(false);
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  // "Before you go" prompt for demo mode: lets a trial user keep the plan they
+  // built by signing up (carried into their account) or downloading an .ics.
+  const [showSaveDemoModal, setShowSaveDemoModal] = useState(false);
+  // Login/sign-up dialog shown over the (blurred) landing page.
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  // Demo plan stashed when the user chooses to sign up, persisted after auth.
+  const pendingDemoDataRef = useRef<AppState | null>(null);
+  // Exit-intent prompt should only auto-appear once per demo session.
+  const exitIntentShownRef = useRef(false);
+  // When the current demo session began, used to enforce a minimum dwell time.
+  const demoStartedAtRef = useRef<number>(0);
   
   // AI State
   const [aiPrompt, setAiPrompt] = useState('');
@@ -129,6 +168,10 @@ export default function App() {
   const sidebarScrollRef = useRef<HTMLDivElement>(null);
   const isScrollingSidebar = useRef(false);
   const isScrollingTimeline = useRef(false);
+  // Auto-fit the zoom to all quests once, the first time a plan is loaded.
+  const didAutoFitRef = useRef(false);
+  // Whether we've done the one-time "logged-in users land on the canvas" redirect.
+  const didInitialRouteRef = useRef(false);
 
   // -- Init & Auth Effects --
 
@@ -161,6 +204,26 @@ export default function App() {
     return () => sub.data.subscription.unsubscribe();
   }, [isDemoMode]);
 
+  // Route based on login state once auth has resolved:
+  //  - logged-in visitors landing on "/" are sent to the canvas (one time only,
+  //    so they can still click the logo to come back to the landing page);
+  //  - the canvas route is guarded — logged-out, non-demo users go to "/".
+  useEffect(() => {
+    if (isLoading || isPreview) return;
+
+    if (!didInitialRouteRef.current) {
+      didInitialRouteRef.current = true;
+      if (session && location.pathname === '/') {
+        navigate('/app', { replace: true });
+        return;
+      }
+    }
+
+    if (onCanvasRoute && !session && !isDemoMode) {
+      navigate('/', { replace: true });
+    }
+  }, [isLoading, session, isDemoMode, onCanvasRoute, location.pathname, isPreview, navigate]);
+
   const loadUserData = async (userId: string) => {
     setIsLoading(true);
     try {
@@ -176,6 +239,19 @@ export default function App() {
         }));
         setData({ ...fetchedData, goals: goalsWithOrder });
       }
+
+      // Carry over a plan built in demo mode: persist it to the new account.
+      const pending = pendingDemoDataRef.current;
+      if (pending && pending.goals.length > 0) {
+        for (const goal of pending.goals) {
+          await WorkersDataService.createGoal(userId, goal);
+        }
+        for (const milestone of pending.globalMilestones) {
+          await WorkersDataService.createGlobalMilestone(userId, milestone);
+        }
+        setData(pending);
+      }
+      pendingDemoDataRef.current = null;
     } catch (err: any) {
       alert('Failed to load data: ' + (err.message || 'Server error'));
     }
@@ -194,6 +270,10 @@ export default function App() {
         const result = await WorkersClient.auth.signIn(authEmail, authPass);
         setSession({ user: result.user, access_token: result.session.access_token });
         await loadUserData(result.user.id);
+        // Signed in: leave demo mode (if active), dismiss the modal, go to canvas.
+        setIsDemoMode(false);
+        setShowAuthModal(false);
+        navigate('/app');
       }
     } catch (error: any) {
       alert(error.message);
@@ -209,6 +289,36 @@ export default function App() {
       await WorkersClient.auth.signOut();
       setSession(null);
     }
+    navigate('/');
+  };
+
+  // Enter the demo and navigate to the canvas route.
+  const openDemo = () => {
+    setIsDemoMode(true);
+    navigate('/app');
+  };
+
+  // Leaving demo mode: if there's a plan worth keeping, prompt to save it first;
+  // otherwise just exit.
+  const requestExitDemo = () => {
+    if (isDemoMode && data.goals.length > 0) {
+      setShowSaveDemoModal(true);
+    } else {
+      handleLogout();
+    }
+  };
+
+  // Stash the demo plan and send the user to sign up; it's persisted to their
+  // account in loadUserData once they're authenticated.
+  // Open the sign-up modal over the demo canvas (kept blurred behind it) and
+  // stash the plan; it's persisted once the user authenticates. Staying in demo
+  // mode means the user keeps their work as the backdrop instead of being thrown
+  // back to the landing page.
+  const saveDemoViaSignup = () => {
+    pendingDemoDataRef.current = data;
+    setAuthMode('signup');
+    setShowSaveDemoModal(false);
+    setShowAuthModal(true);
   };
 
   // Flatten Goals and Subtasks for 1:1 Mapping
@@ -286,7 +396,7 @@ export default function App() {
   // Derive the visible timeline range from the data so the timeline always spans
   // from before the earliest item to after the latest one. This lets users scroll
   // left into the past instead of being pinned to ~today.
-  const { timelineStart, timelineDays } = useMemo(() => {
+  const computedRange = useMemo(() => {
     const dates: Date[] = [startOfDay(new Date())];
 
     data.goals.forEach(g => {
@@ -318,6 +428,17 @@ export default function App() {
 
     return { timelineStart: start, timelineDays: days };
   }, [data]);
+
+  // Freeze the timeline range while dragging. The range is derived from the
+  // data, so updating an item's dates mid-drag would otherwise shift
+  // timelineStart / grow timelineDays and re-lay-out the whole canvas, making
+  // the dragged node jump out from under the cursor. Hold the pre-drag range
+  // until the drag ends, then let it recompute to fit the new positions.
+  const frozenRangeRef = useRef(computedRange);
+  if (!dragState) {
+    frozenRangeRef.current = computedRange;
+  }
+  const { timelineStart, timelineDays } = dragState ? frozenRangeRef.current : computedRange;
 
 
   // -- Drag Logic with Persistence --
@@ -486,7 +607,94 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', handler);
   }, [saveState]);
 
-  // -- Logic Helpers --
+  // Track when the demo session started so the save prompt can require a minimum
+  // dwell time before nagging.
+  useEffect(() => {
+    if (isDemoMode) {
+      demoStartedAtRef.current = Date.now();
+      exitIntentShownRef.current = false;
+    }
+  }, [isDemoMode]);
+
+  // A plan is worth prompting to save once the user has actually changed it from
+  // the demo seed — added/edited/moved a quest — not just by viewing the examples.
+  const demoPlanIsMeaningful =
+    JSON.stringify({ goals: data.goals, globalMilestones: data.globalMilestones }) !== DEMO_SEED_SIGNATURE;
+
+  // Demo mode isn't persisted, so a built-up plan is at risk on leave. Warn on
+  // actual tab/window close, and surface a "save before you go" prompt once the
+  // cursor leaves the top of the window (classic exit intent) — but only after a
+  // meaningful plan exists and the user has spent a little time exploring.
+  useEffect(() => {
+    if (!isDemoMode || isPreview || data.goals.length === 0) return;
+
+    const beforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    const onMouseOut = (e: MouseEvent) => {
+      const dwellElapsed = Date.now() - demoStartedAtRef.current > MIN_DEMO_DWELL_MS;
+      if (e.relatedTarget === null && e.clientY <= 0 && demoPlanIsMeaningful && dwellElapsed && !exitIntentShownRef.current) {
+        exitIntentShownRef.current = true;
+        setShowSaveDemoModal(true);
+      }
+    };
+    window.addEventListener('beforeunload', beforeUnload);
+    document.addEventListener('mouseout', onMouseOut);
+    return () => {
+      window.removeEventListener('beforeunload', beforeUnload);
+      document.removeEventListener('mouseout', onMouseOut);
+    };
+  }, [isDemoMode, data.goals.length, demoPlanIsMeaningful]);
+
+  // Auto-fit: the first time quests are present, set the zoom so the whole plan
+  // (earliest start → latest end) fits the viewport, and scroll to the start.
+  useEffect(() => {
+    if (didAutoFitRef.current || isLoading || data.goals.length === 0) return;
+
+    let min = Infinity;
+    let max = -Infinity;
+    data.goals.forEach(g => {
+      const s = parseLocalDate(g.startDate).getTime();
+      const e = parseLocalDate(g.endDate).getTime();
+      if (!isNaN(s)) { min = Math.min(min, s); max = Math.max(max, s); }
+      if (!isNaN(e)) { min = Math.min(min, e); max = Math.max(max, e); }
+    });
+    if (!isFinite(min) || !isFinite(max)) return;
+
+    const minStart = startOfDay(new Date(min));
+    const spanDays = Math.max(1, diffDays(startOfDay(new Date(max)), minStart));
+
+    // The canvas may not be laid out the instant data lands, so retry across a
+    // few frames until it has a measurable width before computing the zoom.
+    let raf = 0;
+    let attempts = 0;
+    const tryFit = () => {
+      const container = timelineScrollRef.current;
+      if (!container || container.clientWidth === 0) {
+        if (attempts++ < 30) raf = requestAnimationFrame(tryFit);
+        return;
+      }
+      didAutoFitRef.current = true;
+      // Take over scroll positioning from the default "scroll to today" effect.
+      hasScrolledToToday.current = true;
+
+      // Use ~90% of the width so the plan has a little breathing room on each side.
+      const fitPx = Math.max(10, Math.min(200, (container.clientWidth * 0.9) / spanDays));
+      setPxPerDay(fitPx);
+
+      // Scroll to the earliest quest once the new zoom has been laid out.
+      // timelineStart doesn't depend on pxPerDay, so it's stable here.
+      raf = requestAnimationFrame(() => requestAnimationFrame(() => {
+        const el = timelineScrollRef.current;
+        if (!el) return;
+        const leftPx = diffDays(minStart, startOfDay(timelineStart)) * fitPx;
+        el.scrollLeft = Math.max(0, leftPx - el.clientWidth * 0.05);
+      }));
+    };
+    raf = requestAnimationFrame(tryFit);
+    return () => cancelAnimationFrame(raf);
+  }, [isLoading, data.goals.length, timelineStart]);
 
   // -- Logic Helpers --
 
@@ -839,6 +1047,8 @@ export default function App() {
     setIsCreateModalOpen(false);
     setAiSuggestions([]);
     setAiPrompt('');
+    setQuestCategory(CATEGORY_COLORS[0].name);
+    setQuestCategoryTouched(false);
 
     // Async Backend Update
     if (!isDemoMode && session) {
@@ -871,53 +1081,165 @@ export default function App() {
     element.click();
   };
 
-  // --- Auth View ---
-  if (!session && !isDemoMode) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-50 p-4">
-        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl p-8 border border-slate-100">
-          <div className="flex justify-center mb-6">
-             <div className="w-12 h-12 bg-indigo-600 rounded-xl text-white flex items-center justify-center text-2xl shadow-lg font-bold">L</div>
-          </div>
-          <h1 className="text-2xl font-bold text-center text-slate-800 mb-2">Welcome to LifePath</h1>
-          <p className="text-center text-slate-500 mb-8">Plan your life goals on a visual timeline.</p>
-          
-          <form onSubmit={handleAuth} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Email</label>
-              <input 
-                type="email" required 
-                className="w-full border border-slate-300 rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-indigo-500"
-                value={authEmail} onChange={e => setAuthEmail(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">Password</label>
-              <input 
-                type="password" required 
-                className="w-full border border-slate-300 rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-indigo-500"
-                value={authPass} onChange={e => setAuthPass(e.target.value)}
-              />
-            </div>
-            <button type="submit" disabled={isLoading} className="w-full py-3 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700 transition-all shadow-lg hover:shadow-xl disabled:opacity-50">
-              {isLoading ? 'Loading...' : (authMode === 'signin' ? 'Sign In' : 'Sign Up')}
-            </button>
-          </form>
-          
-          <div className="mt-4">
-             <button onClick={() => setIsDemoMode(true)} className="w-full py-2 bg-white border border-slate-300 text-slate-700 rounded-lg font-bold hover:bg-slate-50 transition-all">
-               Try Demo Mode (No Backend)
-             </button>
-          </div>
+  // Login / sign-up dialog. Rendered over a blurred backdrop — either the
+  // landing page (logged-out) or the demo canvas (so a trial user keeps their
+  // work visible behind the form instead of being sent back to the landing page).
+  const authModalEl = showAuthModal ? (
+    <div
+      className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-900/30 p-4 backdrop-blur-md animate-fade-in"
+      onClick={() => setShowAuthModal(false)}
+    >
+      <div
+        className="relative w-full max-w-md rounded-2xl border border-slate-100 bg-white p-8 shadow-2xl"
+        onClick={e => e.stopPropagation()}
+      >
+        <button
+          onClick={() => setShowAuthModal(false)}
+          className="absolute right-4 top-4 rounded-full p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600"
+          aria-label="Close"
+        >
+          <X className="h-5 w-5" />
+        </button>
 
-          <div className="mt-6 text-center text-sm text-slate-600">
-            {authMode === 'signin' ? (
-              <p>Don't have an account? <button onClick={() => setAuthMode('signup')} className="text-indigo-600 font-bold hover:underline">Sign Up</button></p>
-            ) : (
-              <p>Already have an account? <button onClick={() => setAuthMode('signin')} className="text-indigo-600 font-bold hover:underline">Sign In</button></p>
-            )}
-          </div>
+        <div className="mb-6 flex justify-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-indigo-600 text-2xl font-bold text-white shadow-lg">L</div>
         </div>
+        <h2 className="mb-2 text-center text-2xl font-bold text-slate-800">
+          {authMode === 'signin' ? 'Welcome back' : 'Create your account'}
+        </h2>
+        <p className="mb-8 text-center text-slate-500">Plan your life goals on a visual timeline.</p>
+
+        {pendingDemoDataRef.current && pendingDemoDataRef.current.goals.length > 0 && (
+          <div className="mb-6 rounded-lg border border-indigo-100 bg-indigo-50 px-4 py-3 text-center text-sm text-indigo-700">
+            ✨ Create an account and your {pendingDemoDataRef.current.goals.length === 1 ? 'demo quest' : `${pendingDemoDataRef.current.goals.length} demo quests`} will be saved to it.
+          </div>
+        )}
+
+        <form onSubmit={handleAuth} className="space-y-4">
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Email</label>
+            <input
+              type="email" required
+              className="w-full rounded-lg border border-slate-300 p-2.5 outline-none focus:ring-2 focus:ring-indigo-500"
+              value={authEmail} onChange={e => setAuthEmail(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-sm font-medium text-slate-700">Password</label>
+            <input
+              type="password" required
+              className="w-full rounded-lg border border-slate-300 p-2.5 outline-none focus:ring-2 focus:ring-indigo-500"
+              value={authPass} onChange={e => setAuthPass(e.target.value)}
+            />
+          </div>
+          <button type="submit" disabled={isLoading} className="w-full rounded-lg bg-indigo-600 py-3 font-bold text-white shadow-lg transition-all hover:bg-indigo-700 hover:shadow-xl disabled:opacity-50">
+            {isLoading ? 'Loading...' : (authMode === 'signin' ? 'Sign In' : 'Sign Up')}
+          </button>
+        </form>
+
+        <div className="mt-6 text-center text-sm text-slate-600">
+          {authMode === 'signin' ? (
+            <p>Don't have an account? <button onClick={() => setAuthMode('signup')} className="font-bold text-indigo-600 hover:underline">Sign Up</button></p>
+          ) : (
+            <p>Already have an account? <button onClick={() => setAuthMode('signin')} className="font-bold text-indigo-600 hover:underline">Sign In</button></p>
+          )}
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  // --- Landing Page (with login modal over a blurred backdrop) ---
+  if (!onCanvasRoute && !isPreview) {
+    return (
+      <div className="relative flex min-h-screen flex-col overflow-hidden bg-gradient-to-br from-indigo-50 via-white to-slate-50">
+        {/* Decorative background blobs */}
+        <div className="pointer-events-none absolute -top-32 -left-24 h-96 w-96 rounded-full bg-indigo-200/40 blur-3xl" />
+        <div className="pointer-events-none absolute -bottom-32 -right-24 h-96 w-96 rounded-full bg-violet-200/40 blur-3xl" />
+
+        {/* Top bar */}
+        <header className="relative z-10 flex items-center justify-between px-6 py-5 sm:px-10">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-600 text-lg font-bold text-white shadow-md">L</div>
+            <span className="text-lg font-bold text-slate-800">LifePath</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => { setAuthMode('signin'); setShowAuthModal(true); }}
+              className="rounded-lg px-4 py-2 text-sm font-semibold text-slate-700 transition-colors hover:bg-white/70"
+            >
+              Log in
+            </button>
+            <button
+              onClick={() => { setAuthMode('signup'); setShowAuthModal(true); }}
+              className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-indigo-700"
+            >
+              Sign up
+            </button>
+          </div>
+        </header>
+
+        {/* Hero */}
+        <main className="relative z-10 flex flex-1 flex-col items-center justify-center px-6 pb-24 text-center">
+          <span className="mb-5 inline-flex items-center rounded-full border border-indigo-100 bg-white/70 px-3 py-1 text-xs font-semibold text-indigo-600 shadow-sm">
+            ✨ Visual goal planning
+          </span>
+          <h1 className="max-w-2xl text-4xl font-extrabold leading-tight tracking-tight text-slate-900 sm:text-5xl">
+            Plan your life goals on a visual timeline
+          </h1>
+          <p className="mt-4 max-w-lg text-lg text-slate-500">
+            Map out quests, break them into milestones, and drag them across a timeline. Try it instantly — no account required.
+          </p>
+          <div className="mt-8 flex flex-col items-center gap-3 sm:flex-row">
+            <button
+              onClick={openDemo}
+              className="rounded-xl bg-indigo-600 px-7 py-3.5 text-base font-bold text-white shadow-lg shadow-indigo-600/20 transition-all hover:bg-indigo-700 hover:shadow-xl"
+            >
+              Try it free →
+            </button>
+            <button
+              onClick={() => { setAuthMode('signin'); setShowAuthModal(true); }}
+              className="rounded-xl border border-slate-300 bg-white px-7 py-3.5 text-base font-bold text-slate-700 shadow-sm transition-all hover:bg-slate-50"
+            >
+              Log in
+            </button>
+          </div>
+          <p className="mt-4 text-sm text-slate-400">No sign-up needed to explore the demo.</p>
+
+          {/* Live preview of the demo canvas — click anywhere to open it for real */}
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={openDemo}
+            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDemo(); } }}
+            aria-label="Open the interactive demo"
+            className="group mt-12 w-full max-w-6xl cursor-pointer rounded-2xl border border-slate-200 bg-white p-2 shadow-2xl shadow-indigo-600/10 transition-all hover:-translate-y-1 hover:shadow-indigo-600/20 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          >
+            {/* Browser chrome */}
+            <div className="flex items-center gap-1.5 px-3 py-2">
+              <span className="h-3 w-3 rounded-full bg-red-400" />
+              <span className="h-3 w-3 rounded-full bg-amber-400" />
+              <span className="h-3 w-3 rounded-full bg-green-400" />
+              <span className="ml-3 truncate text-xs text-slate-400">lifepath — your timeline</span>
+            </div>
+            <div className="relative overflow-hidden rounded-lg border border-slate-100">
+              <iframe
+                src="/app?preview=1"
+                title="LifePath demo preview"
+                tabIndex={-1}
+                scrolling="no"
+                className="pointer-events-none h-[640px] w-full bg-white"
+              />
+              {/* Hover veil + call to action */}
+              <div className="absolute inset-0 flex items-center justify-center bg-indigo-600/0 transition-colors group-hover:bg-indigo-600/5">
+                <span className="rounded-full bg-white/95 px-5 py-2.5 text-sm font-bold text-indigo-700 opacity-0 shadow-lg ring-1 ring-indigo-100 transition-opacity group-hover:opacity-100">
+                  Open the interactive demo →
+                </span>
+              </div>
+            </div>
+          </div>
+        </main>
+
+        {authModalEl}
       </div>
     );
   }
@@ -927,7 +1249,7 @@ export default function App() {
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-white">
       
       {/* --- Demo Banner --- */}
-      {isDemoMode && (
+      {isDemoMode && !isPreview && (
         <div className="shrink-0 bg-amber-100 text-amber-800 text-xs font-bold text-center py-1 z-[60] border-b border-amber-200">
           DEMO MODE - Changes will not be saved
         </div>
@@ -938,10 +1260,14 @@ export default function App() {
         <aside className={`${isSidebarOpen ? 'w-72' : 'w-0'} transition-all duration-300 ease-in-out border-r border-slate-200 flex flex-col bg-slate-50 z-50 shadow-sm relative`}>
           <div className="overflow-hidden shrink-0 border-b border-slate-200 h-28">
              <div className="px-4 border-b border-slate-200 flex items-center justify-between bg-white h-14 box-border">
-              <div className="font-bold text-xl text-slate-800 flex items-center gap-2 whitespace-nowrap">
+              <button
+                onClick={() => navigate('/')}
+                className="font-bold text-xl text-slate-800 flex items-center gap-2 whitespace-nowrap rounded-md hover:opacity-80 transition-opacity"
+                title="Back to home"
+              >
                 <div className="w-7 h-7 bg-indigo-600 rounded-lg text-white flex items-center justify-center text-sm shadow-sm">L</div>
                 LifePath
-              </div>
+              </button>
               <div className="flex items-center gap-2">
                 {/* Add Actions Group */}
                   <button 
@@ -1072,13 +1398,14 @@ export default function App() {
             <div className="p-4 bg-white border-t border-slate-200 shrink-0">
               <button
                 onClick={() => {
-                  setIsDemoMode(false);
-                  setSession(null);
+                  if (data.goals.length > 0) pendingDemoDataRef.current = data;
+                  setAuthMode('signin');
+                  setShowAuthModal(true);
                 }}
-                className="w-full py-2.5 px-4 text-sm font-medium rounded-lg transition-all shadow-sm border border-indigo-200 bg-white text-indigo-700 hover:bg-indigo-50 hover:shadow"
+                className="w-full py-2.5 px-4 text-sm font-bold rounded-lg transition-all bg-indigo-600 text-white shadow-lg shadow-indigo-600/20 hover:bg-indigo-700 hover:shadow-xl"
                 title="Sign in to save your data"
               >
-                Sign In
+                Sign In to Save
               </button>
             </div>
           ) : session && (saveState === 'saving' || saveState === 'error') && (
@@ -1150,7 +1477,7 @@ export default function App() {
                     {(session || isDemoMode) && (
                       <button
                         onClick={() => {
-                          handleLogout();
+                          isDemoMode ? requestExitDemo() : handleLogout();
                           setIsMenuOpen(false);
                         }}
                         className="w-full px-3 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 flex items-center gap-2 transition-colors"
@@ -1254,8 +1581,9 @@ export default function App() {
                                   const startPx = dateToPx(g.startDate);
                                   const endPx = dateToPx(g.endDate);
                                   const width = Math.max(endPx - startPx, pxPerDay);
+                                  const isMoving = dragState?.type === 'goal-move' && dragState.itemId === g.id;
                                   return (
-                                    <div 
+                                    <div
                                       className="h-9 absolute top-1.5 rounded-md shadow-sm flex items-center px-3 cursor-move select-none ring-1 ring-transparent hover:ring-black/5 transition-all active:ring-2 active:ring-offset-1 z-10"
                                       style={{ left: startPx, width, backgroundColor: g.color + '20', borderColor: g.color, borderWidth: '1px', borderStyle: 'solid', color: g.color }}
                                       onMouseDown={(e) => {
@@ -1265,6 +1593,11 @@ export default function App() {
                                       }}
                                       onClick={() => { setSelectedItemId({type: 'goal', id: g.id}); setIsDrawerOpen(true); }}
                                     >
+                                       {isMoving && (
+                                         <div className="absolute -top-9 left-1/2 -translate-x-1/2 z-50 whitespace-nowrap rounded-md bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 shadow-lg ring-1 ring-black/10 pointer-events-none">
+                                           {formatTooltipDate(g.startDate)} <span className="text-slate-400">→</span> {formatTooltipDate(g.endDate)}
+                                         </div>
+                                       )}
                                        <Handle type="start" onDragStart={(e) => setDragState({ type: 'goal-resize-start', itemId: g.id, startX: e.clientX, originalData: {...g} })} />
                                        <span className="text-xs font-bold truncate w-full px-1 select-none">{g.title}</span>
                                        <Handle type="end" onDragStart={(e) => setDragState({ type: 'goal-resize-end', itemId: g.id, startX: e.clientX, originalData: {...g} })} />
@@ -1590,14 +1923,17 @@ export default function App() {
            <div className="bg-white rounded-xl shadow-2xl w-[500px] overflow-hidden transform transition-all scale-100">
              <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
                <h2 className="text-lg font-bold text-slate-800">Start a New Quest</h2>
-               <button onClick={() => setIsCreateModalOpen(false)} className="p-1 hover:bg-slate-200 rounded-full"><X className="w-5 h-5 text-slate-500" /></button>
+               <button onClick={() => { setIsCreateModalOpen(false); setQuestCategoryTouched(false); }} className="p-1 hover:bg-slate-200 rounded-full"><X className="w-5 h-5 text-slate-500" /></button>
              </div>
              <div className="p-6">
                 <form onSubmit={handleCreateGoal} className="space-y-5">
                   <div>
                     <label className="block text-sm font-bold text-slate-700 mb-1">Goal Title</label>
                     <div className="flex gap-2">
-                      <input name="title" className="flex-1 border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="e.g. Learn French" required value={aiPrompt} onChange={(e) => setAiPrompt(e.target.value)} />
+                      <input name="title" className="flex-1 border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-indigo-500 outline-none" placeholder="e.g. Learn French" required value={aiPrompt} onChange={(e) => {
+                        setAiPrompt(e.target.value);
+                        if (!questCategoryTouched) setQuestCategory(inferCategory(e.target.value));
+                      }} />
                       <button type="button" onClick={handleGetAiSuggestions} disabled={isAiLoading || !aiPrompt} className="bg-indigo-50 text-indigo-600 px-4 rounded-lg border border-indigo-100 hover:bg-indigo-100 flex items-center gap-2 text-sm font-medium disabled:opacity-50">
                         <Wand2 className="w-4 h-4" /> {isAiLoading ? 'Thinking...' : 'AI Plan'}
                       </button>
@@ -1619,12 +1955,20 @@ export default function App() {
                   )}
                   <div>
                     <label className="block text-sm font-bold text-slate-700 mb-1">Category</label>
-                    <select name="category" className="w-full border border-slate-300 rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-indigo-500">
-                      {CATEGORY_COLORS.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
-                    </select>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 -translate-y-1/2 w-3 h-3 rounded-full pointer-events-none" style={{ backgroundColor: CATEGORY_COLORS.find(c => c.name === questCategory)?.hex }} />
+                      <select
+                        name="category"
+                        value={questCategory}
+                        onChange={(e) => { setQuestCategory(e.target.value); setQuestCategoryTouched(true); }}
+                        className="w-full border border-slate-300 rounded-lg p-2.5 pl-8 outline-none focus:ring-2 focus:ring-indigo-500"
+                      >
+                        {CATEGORY_COLORS.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+                      </select>
+                    </div>
                   </div>
                   <div className="pt-4 border-t border-slate-100 flex justify-end gap-3">
-                    <button type="button" onClick={() => setIsCreateModalOpen(false)} className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium">Cancel</button>
+                    <button type="button" onClick={() => { setIsCreateModalOpen(false); setQuestCategoryTouched(false); }} className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-lg font-medium">Cancel</button>
                     <button type="submit" className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 font-medium shadow-sm hover:shadow transition-all">Create Quest</button>
                   </div>
                 </form>
@@ -1634,10 +1978,47 @@ export default function App() {
       )}
 
       {/* --- Migration Required Modal --- */}
-      <MigrationRequiredModal 
-        isOpen={showMigrationModal} 
-        onClose={() => setShowMigrationModal(false)} 
+      <MigrationRequiredModal
+        isOpen={showMigrationModal}
+        onClose={() => setShowMigrationModal(false)}
       />
+
+      {/* Login / sign-up over the (blurred) canvas, e.g. when saving a demo plan */}
+      {authModalEl}
+
+      {/* --- Save-your-demo-plan Modal --- */}
+      {showSaveDemoModal && (
+        <div className="fixed inset-0 bg-black/50 z-[80] flex items-center justify-center animate-fade-in p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div className="p-6">
+              <h2 className="text-lg font-bold text-slate-800">Before you go — keep your plan</h2>
+              <p className="text-sm text-slate-500 mt-1">
+                You're in demo mode, so this {data.goals.length === 1 ? 'quest' : `${data.goals.length} quests`} won't be saved. Create an account to carry it over, or download a calendar file.
+              </p>
+              <div className="mt-6 space-y-2.5">
+                <button
+                  onClick={saveDemoViaSignup}
+                  className="w-full py-2.5 px-4 bg-indigo-600 text-white rounded-lg font-bold hover:bg-indigo-700 shadow-sm hover:shadow transition-all"
+                >
+                  Sign up &amp; save my plan
+                </button>
+                <button
+                  onClick={() => exportICS()}
+                  className="w-full py-2.5 px-4 bg-white border border-slate-300 text-slate-700 rounded-lg font-medium hover:bg-slate-50 transition-all"
+                >
+                  Download .ics calendar
+                </button>
+              </div>
+              <button
+                onClick={() => setShowSaveDemoModal(false)}
+                className="w-full mt-3 py-2 text-sm text-slate-500 hover:text-slate-700 font-medium"
+              >
+                Keep exploring
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
