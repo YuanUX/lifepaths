@@ -34,6 +34,11 @@ INITIAL_START_DATE.setDate(INITIAL_START_DATE.getDate() - 5);
 const ROW_HEIGHT = 48;
 const DEFAULT_PX_PER_DAY = 15;
 const MILESTONE_TOP_POSITION = 16;
+// How many days of empty space to keep before the earliest / after the latest item,
+// so there's always room to scroll into the past and future.
+const TIMELINE_PADDING_DAYS = 30;
+// Always render at least this many days, even for an empty/short timeline.
+const MIN_TIMELINE_DAYS = 200;
 
 const INITIAL_STATE: AppState = {
   user: { xp: 0, level: 1, nextLevelXp: 300 },
@@ -94,7 +99,6 @@ export default function App() {
   const [dbError, setDbError] = useState<boolean>(false);
   const [isDemoMode, setIsDemoMode] = useState(false);
   
-  const [timelineStart, setTimelineStart] = useState<Date>(INITIAL_START_DATE);
   const [pxPerDay, setPxPerDay] = useState<number>(DEFAULT_PX_PER_DAY);
 
   const [selectedItemId, setSelectedItemId] = useState<{type: 'goal' | 'subtask' | 'milestone', id: string, parentId?: string} | null>(null);
@@ -277,6 +281,42 @@ export default function App() {
     })));
 
     return [...globalMs, ...goalMs].sort((a, b) => a.dateObj.getTime() - b.dateObj.getTime());
+  }, [data]);
+
+  // Derive the visible timeline range from the data so the timeline always spans
+  // from before the earliest item to after the latest one. This lets users scroll
+  // left into the past instead of being pinned to ~today.
+  const { timelineStart, timelineDays } = useMemo(() => {
+    const dates: Date[] = [startOfDay(new Date())];
+
+    data.goals.forEach(g => {
+      const gStart = parseLocalDate(g.startDate);
+      const gEnd = parseLocalDate(g.endDate);
+      if (!isNaN(gStart.getTime())) dates.push(gStart);
+      if (!isNaN(gEnd.getTime())) dates.push(gEnd);
+      if (!isNaN(gStart.getTime())) {
+        g.subtasks.forEach(s => {
+          const sStart = addDays(gStart, s.startOffsetDays);
+          dates.push(sStart, addDays(sStart, s.durationDays));
+        });
+      }
+      g.milestones.forEach(m => {
+        const md = parseLocalDate(m.date);
+        if (!isNaN(md.getTime())) dates.push(md);
+      });
+    });
+
+    data.globalMilestones.forEach(m => {
+      const md = parseLocalDate(m.date);
+      if (!isNaN(md.getTime())) dates.push(md);
+    });
+
+    const times = dates.map(d => d.getTime());
+    const start = startOfDay(addDays(new Date(Math.min(...times)), -TIMELINE_PADDING_DAYS));
+    const end = startOfDay(addDays(new Date(Math.max(...times)), TIMELINE_PADDING_DAYS));
+    const days = Math.max(MIN_TIMELINE_DAYS, diffDays(end, start));
+
+    return { timelineStart: start, timelineDays: days };
   }, [data]);
 
 
@@ -493,6 +533,16 @@ export default function App() {
   
   const todayPx = dateToPxCentered(new Date());
 
+  // On first load, scroll so "today" is in view rather than the far-left past padding.
+  const hasScrolledToToday = useRef(false);
+  useEffect(() => {
+    if (isLoading || hasScrolledToToday.current) return;
+    if (timelineScrollRef.current) {
+      timelineScrollRef.current.scrollLeft = Math.max(0, todayPx - 120);
+      hasScrolledToToday.current = true;
+    }
+  }, [isLoading, todayPx]);
+
   const handleZoomIn = () => setPxPerDay(prev => Math.min(prev + 10, 200));
   const handleZoomOut = () => setPxPerDay(prev => Math.max(prev - 10, 10));
 
@@ -702,7 +752,7 @@ export default function App() {
 
   // -- Render Helpers --
   const renderTimelineHeader = () => {
-    const daysToRender = 200;
+    const daysToRender = timelineDays;
     const months: React.ReactNode[] = [];
     let currentMonth = -1;
     for (let i = 0; i < daysToRender; i++) {
@@ -723,7 +773,7 @@ export default function App() {
 
   const renderGrid = () => {
     const lines = [];
-    for (let i = 0; i < 200; i++) {
+    for (let i = 0; i < timelineDays; i++) {
       const d = addDays(timelineStart, i);
       const isWeekend = d.getDay() === 0 || d.getDay() === 6;
       lines.push(
@@ -1142,7 +1192,7 @@ export default function App() {
           <div className="flex-1 overflow-auto custom-scrollbar relative" ref={timelineScrollRef} onScroll={handleTimelineScroll}>
              
              {/* Unified Content Wrapper - Forces width for both header and body */}
-             <div className="min-w-[8000px] relative min-h-full flex flex-col">
+             <div className="min-w-full relative min-h-full flex flex-col" style={{ width: timelineDays * pxPerDay }}>
                 
                 {/* Sticky Header */}
                 <div className="sticky top-0 z-30 bg-white border-b border-slate-200 h-28 shrink-0 shadow-sm">
