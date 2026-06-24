@@ -1981,24 +1981,8 @@ export default function App() {
 
                       {/* Subtasks */}
                       <div>
-                        <div className="flex items-center justify-between mb-3">
+                        <div className="mb-3">
                           <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Subtasks ({goal.subtasks.length})</label>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const newSubtask: Subtask = {
-                                id: generateId(),
-                                title: 'New Subtask',
-                                startOffsetDays: 0,
-                                durationDays: 7,
-                                status: Status.TODO,
-                                order: goal.subtasks.length
-                              };
-                              const updated = {...goal, subtasks: [...goal.subtasks, newSubtask]};
-                              setData({...data, goals: data.goals.map(g => g.id === goal.id ? updated : g)});
-                            }}
-                            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
-                          >+ Add</button>
                         </div>
                         <div className="space-y-1.5 max-h-48 overflow-y-auto">
                           {goal.subtasks.map(subtask => (
@@ -2015,26 +1999,28 @@ export default function App() {
                             </div>
                           ))}
                         </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const newSubtask: Subtask = {
+                              id: generateId(),
+                              title: 'New Subtask',
+                              startOffsetDays: 0,
+                              durationDays: 7,
+                              status: Status.TODO,
+                              order: goal.subtasks.length
+                            };
+                            const updated = {...goal, subtasks: [...goal.subtasks, newSubtask]};
+                            setData({...data, goals: data.goals.map(g => g.id === goal.id ? updated : g)});
+                          }}
+                          className="mt-2 w-full py-2 text-xs font-medium text-indigo-600 hover:text-indigo-800 hover:bg-slate-50 border border-dashed border-slate-300 hover:border-indigo-300 rounded-md transition-colors cursor-pointer"
+                        >+ Add subtask</button>
                       </div>
 
                       {/* Milestones */}
                       <div>
-                        <div className="flex items-center justify-between mb-3">
+                        <div className="mb-3">
                           <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Milestones ({goal.milestones.length})</label>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              const newMilestone: GoalMilestone = {
-                                id: generateId(),
-                                title: 'New Milestone',
-                                date: formatDate(new Date()),
-                                isCompleted: false
-                              };
-                              const updated = {...goal, milestones: [...goal.milestones, newMilestone]};
-                              setData({...data, goals: data.goals.map(g => g.id === goal.id ? updated : g)});
-                            }}
-                            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium"
-                          >+ Add</button>
                         </div>
                         <div className="space-y-1.5 max-h-48 overflow-y-auto">
                           {goal.milestones.map(milestone => (
@@ -2051,6 +2037,20 @@ export default function App() {
                             </div>
                           ))}
                         </div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const newMilestone: GoalMilestone = {
+                              id: generateId(),
+                              title: 'New Milestone',
+                              date: formatDate(new Date()),
+                              isCompleted: false
+                            };
+                            const updated = {...goal, milestones: [...goal.milestones, newMilestone]};
+                            setData({...data, goals: data.goals.map(g => g.id === goal.id ? updated : g)});
+                          }}
+                          className="mt-2 w-full py-2 text-xs font-medium text-indigo-600 hover:text-indigo-800 hover:bg-slate-50 border border-dashed border-slate-300 hover:border-indigo-300 rounded-md transition-colors cursor-pointer"
+                        >+ Add milestone</button>
                       </div>
 
                       <GoalNotes
