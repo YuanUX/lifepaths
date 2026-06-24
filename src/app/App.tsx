@@ -240,18 +240,35 @@ export default function App() {
         setData({ ...fetchedData, goals: goalsWithOrder });
       }
 
-      // Carry over a plan built in demo mode: persist it to the new account.
+      // Carry over a plan built in demo mode: persist it to the account. Only do
+      // this when the user actually changed the demo seed (not just viewed the
+      // examples), and assign fresh IDs so we never collide with existing rows.
       const pending = pendingDemoDataRef.current;
-      if (pending && pending.goals.length > 0) {
-        for (const goal of pending.goals) {
+      pendingDemoDataRef.current = null;
+      const pendingChanged = pending &&
+        JSON.stringify({ goals: pending.goals, globalMilestones: pending.globalMilestones }) !== DEMO_SEED_SIGNATURE;
+      if (pending && pendingChanged && pending.goals.length > 0) {
+        const migratedGoals = pending.goals.map(g => ({
+          ...g,
+          id: generateId(),
+          subtasks: g.subtasks.map(s => ({ ...s, id: generateId() })),
+          milestones: g.milestones.map(m => ({ ...m, id: generateId() })),
+        }));
+        const migratedGlobals = pending.globalMilestones.map(m => ({ ...m, id: generateId() }));
+
+        for (const goal of migratedGoals) {
           await WorkersDataService.createGoal(userId, goal);
         }
-        for (const milestone of pending.globalMilestones) {
+        for (const milestone of migratedGlobals) {
           await WorkersDataService.createGlobalMilestone(userId, milestone);
         }
-        setData(pending);
+        // Merge into whatever the account already had.
+        setData(prev => ({
+          ...prev,
+          goals: [...prev.goals, ...migratedGoals.map((g, i) => ({ ...g, order: prev.goals.length + i }))],
+          globalMilestones: [...prev.globalMilestones, ...migratedGlobals],
+        }));
       }
-      pendingDemoDataRef.current = null;
     } catch (err: any) {
       alert('Failed to load data: ' + (err.message || 'Server error'));
     }
