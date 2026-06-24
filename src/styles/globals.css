@@ -257,3 +257,31 @@ html {
 .animate-slide-down {
   animation: slide-down 0.3s ease-out;
 }
+
+/* Edit drawer entrance: a content fade. The actual reveal motion comes from the
+   drawer's width growing (see .drawer-animated), which is driven in lockstep
+   with the canvas zoom so the canvas eases to its smaller size. Registered as a
+   Tailwind v4 @utility so the md: variant actually generates — plain custom
+   classes don't get variants in v4. */
+@keyframes drawer-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@utility animate-drawer-in {
+  animation: drawer-in 0.28s ease-out;
+}
+
+/* On desktop the drawer's width is driven by --drawer-w (set imperatively during
+   the open animation, then cleared back to the default). The canvas is a flex
+   sibling, so animating this width smoothly shrinks the canvas. Content inside is
+   pinned to md:w-80 and the drawer clips overflow-x, so it doesn't reflow. */
+@media (min-width: 48rem) {
+  .drawer-animated {
+    width: var(--drawer-w, 20rem);
+  }
+}

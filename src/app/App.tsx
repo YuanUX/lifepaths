@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo, useSyncExternalStore } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useMemo, useSyncExternalStore } from 'react';
 import { useNavigate, useLocation } from 'react-router';
 import {
   ChevronRight, ChevronDown, Plus, Calendar,
@@ -41,6 +41,10 @@ INITIAL_START_DATE.setDate(INITIAL_START_DATE.getDate() - 5);
 
 const ROW_HEIGHT = 48;
 const DEFAULT_PX_PER_DAY = 15;
+// Desktop edit-drawer width (Tailwind md breakpoint + w-80). Used to animate the
+// drawer open in lockstep with the zoom and to keep zoom centering accurate.
+const DRAWER_WIDTH = 320;
+const MD_BREAKPOINT = '(min-width: 48rem)';
 const MILESTONE_TOP_POSITION = 16;
 // How many days of empty space to keep before the earliest / after the latest item,
 // so there's always room to scroll into the past and future.
@@ -166,10 +170,19 @@ export default function App() {
   // Refs for synced scrolling
   const timelineScrollRef = useRef<HTMLDivElement>(null);
   const sidebarScrollRef = useRef<HTMLDivElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
+  // The canvas content wrapper; holds the --ppd (px-per-day) CSS variable that
+  // drives every horizontal position. Animated imperatively for smooth zoom.
+  const canvasContentRef = useRef<HTMLDivElement>(null);
+  // Stashed by a quest click; consumed in a layout effect once the drawer has
+  // mounted so the zoom (and drawer-width) animation starts after layout.
+  const pendingZoomRef = useRef<{ targetPx: number; targetScroll: number; animateWidth: boolean } | null>(null);
   const isScrollingSidebar = useRef(false);
   const isScrollingTimeline = useRef(false);
   // Auto-fit the zoom to all quests once, the first time a plan is loaded.
   const didAutoFitRef = useRef(false);
+  // Holds the in-flight requestAnimationFrame id for the zoom-to-quest tween.
+  const zoomAnimRef = useRef<number | null>(null);
   // Whether we've done the one-time "logged-in users land on the canvas" redirect.
   const didInitialRouteRef = useRef(false);
 
@@ -664,23 +677,23 @@ export default function App() {
     };
   }, [isDemoMode, data.goals.length, demoPlanIsMeaningful]);
 
-  // Auto-fit: the first time quests are present, set the zoom so the whole plan
-  // (earliest start → latest end) fits the viewport, and scroll to the start.
+  // Auto-fit: the first time quests are present, set the default view to span
+  // from one week before today to the end of the last quest, and scroll there.
+  // Quests that start further in the past are still reachable by scrolling left.
   useEffect(() => {
     if (didAutoFitRef.current || isLoading || data.goals.length === 0) return;
 
-    let min = Infinity;
-    let max = -Infinity;
+    let maxEnd = -Infinity;
     data.goals.forEach(g => {
-      const s = parseLocalDate(g.startDate).getTime();
       const e = parseLocalDate(g.endDate).getTime();
-      if (!isNaN(s)) { min = Math.min(min, s); max = Math.max(max, s); }
-      if (!isNaN(e)) { min = Math.min(min, e); max = Math.max(max, e); }
+      if (!isNaN(e)) maxEnd = Math.max(maxEnd, e);
     });
-    if (!isFinite(min) || !isFinite(max)) return;
+    if (!isFinite(maxEnd)) return;
 
-    const minStart = startOfDay(new Date(min));
-    const spanDays = Math.max(1, diffDays(startOfDay(new Date(max)), minStart));
+    // Default window: one week before today → last quest's end.
+    const minStart = startOfDay(addDays(new Date(), -7));
+    const endDay = startOfDay(new Date(maxEnd));
+    const spanDays = Math.max(1, diffDays(endDay, minStart));
 
     // The canvas may not be laid out the instant data lands, so retry across a
     // few frames until it has a measurable width before computing the zoom.
@@ -696,12 +709,12 @@ export default function App() {
       // Take over scroll positioning from the default "scroll to today" effect.
       hasScrolledToToday.current = true;
 
-      // Use ~90% of the width so the plan has a little breathing room on each side.
+      // Use ~90% of the width so the window has a little breathing room.
       const fitPx = Math.max(10, Math.min(200, (container.clientWidth * 0.9) / spanDays));
       setPxPerDay(fitPx);
 
-      // Scroll to the earliest quest once the new zoom has been laid out.
-      // timelineStart doesn't depend on pxPerDay, so it's stable here.
+      // Scroll so the start of the window (a week before today) sits near the
+      // left edge. timelineStart doesn't depend on pxPerDay, so it's stable here.
       raf = requestAnimationFrame(() => requestAnimationFrame(() => {
         const el = timelineScrollRef.current;
         if (!el) return;
@@ -712,6 +725,27 @@ export default function App() {
     raf = requestAnimationFrame(tryFit);
     return () => cancelAnimationFrame(raf);
   }, [isLoading, data.goals.length, timelineStart]);
+
+  // Stop any in-flight zoom-to-quest animation when the canvas unmounts.
+  useEffect(() => () => {
+    if (zoomAnimRef.current !== null) cancelAnimationFrame(zoomAnimRef.current);
+  }, []);
+
+  // Keep the --ppd CSS variable in sync with the committed zoom level. Using a
+  // layout effect (before paint) avoids a flash, and keeping --ppd out of the
+  // React style prop means a mid-animation re-render can't clobber the value the
+  // animation loop is imperatively driving.
+  useLayoutEffect(() => {
+    canvasContentRef.current?.style.setProperty('--ppd', `${pxPerDay}px`);
+  }, [pxPerDay]);
+
+  // The data source changed (signed in/out, entered/left demo). Re-arm the
+  // one-time auto-fit so the freshly loaded plan opens at the default window
+  // (a week before today → the last quest's end) instead of staying put.
+  useEffect(() => {
+    didAutoFitRef.current = false;
+    hasScrolledToToday.current = false;
+  }, [session?.user?.id, isDemoMode]);
 
   // -- Logic Helpers --
 
@@ -750,13 +784,26 @@ export default function App() {
     const normalizedStart = startOfDay(timelineStart);
     return diffDays(normalizedDate, normalizedStart) * pxPerDay;
   };
-  
+
   // Helper to center point-in-time elements (milestones, TODAY marker) at noon
   const dateToPxCentered = (dateStr: string | Date) => {
     return dateToPx(dateStr) + (pxPerDay * 0.5);
   };
-  
+
   const todayPx = dateToPxCentered(new Date());
+
+  // Zoom-independent day offset from the timeline start. Every horizontal
+  // position is rendered as calc(var(--ppd) * offset) using this, so the whole
+  // canvas can be re-scaled by animating one CSS variable (--ppd) imperatively —
+  // no React re-render per frame, no text distortion.
+  const dayOffsetOf = (dateStr: string | Date) => {
+    const date = typeof dateStr === 'string' ? parseLocalDate(dateStr) : dateStr;
+    if (isNaN(date.getTime())) return 0;
+    return diffDays(startOfDay(date), startOfDay(timelineStart));
+  };
+  const ppx = (days: number) => `calc(var(--ppd, ${DEFAULT_PX_PER_DAY}px) * ${days})`;
+  // Centered (noon) offset for point-in-time markers.
+  const todayOffset = dayOffsetOf(new Date()) + 0.5;
 
   // On first load, scroll so "today" is in view rather than the far-left past padding.
   const hasScrolledToToday = useRef(false);
@@ -768,8 +815,119 @@ export default function App() {
     }
   }, [isLoading, todayPx]);
 
-  const handleZoomIn = () => setPxPerDay(prev => Math.min(prev + 10, 200));
-  const handleZoomOut = () => setPxPerDay(prev => Math.max(prev - 10, 10));
+  // The zoom level currently shown. During an animation this is the live --ppd
+  // being driven imperatively; at rest it equals the committed pxPerDay state.
+  const currentPpd = () => {
+    const v = canvasContentRef.current ? parseFloat(canvasContentRef.current.style.getPropertyValue('--ppd')) : NaN;
+    return isNaN(v) ? pxPerDay : v;
+  };
+
+  // Zoom about the viewport center: keep whatever day sits at the middle of the
+  // canvas fixed while the scale changes, then animate to the new position.
+  const zoomBy = (delta: number) => {
+    const fromPx = currentPpd();
+    const targetPx = Math.max(10, Math.min(200, fromPx + delta));
+    const el = timelineScrollRef.current;
+    if (!el || el.clientWidth === 0 || targetPx === fromPx) { setPxPerDay(targetPx); return; }
+    const dayAtCenter = (el.scrollLeft + el.clientWidth / 2) / fromPx;
+    const targetScroll = Math.max(0, dayAtCenter * targetPx - el.clientWidth / 2);
+    animateTimeline(targetPx, targetScroll);
+  };
+  const handleZoomIn = () => zoomBy(10);
+  const handleZoomOut = () => zoomBy(-10);
+
+  // Smoothly tween zoom (pxPerDay) and horizontal scroll together over ~350ms.
+  // Driving both from a single rAF loop keeps the grid, quest bars, milestones
+  // and scroll position moving in lockstep for a clean zoom animation. When
+  // `animateWidth` is set, the drawer's width is grown from 0 in the same loop
+  // so the canvas eases to its smaller size instead of snapping.
+  const animateTimeline = (targetPx: number, targetScroll: number, duration = 350, animateWidth = false) => {
+    const el = timelineScrollRef.current;
+    if (!el) { setPxPerDay(targetPx); return; }
+    if (zoomAnimRef.current !== null) cancelAnimationFrame(zoomAnimRef.current);
+
+    const fromPx = currentPpd();
+    const fromScroll = el.scrollLeft;
+    const canvas = canvasContentRef.current;
+
+    // Resolve the drawer-width tween (all values toward DRAWER_WIDTH = full):
+    //  - opening fresh: 0 -> full
+    //  - a prior open was interrupted (var still set): current -> full
+    //  - otherwise: leave the width alone.
+    const drawer = drawerRef.current;
+    let widthFrom: number | null = null;
+    if (drawer) {
+      const current = drawer.style.getPropertyValue('--drawer-w');
+      if (animateWidth) widthFrom = 0;
+      else if (current !== '') widthFrom = parseFloat(current) || 0;
+      if (widthFrom !== null) drawer.style.setProperty('--drawer-w', `${widthFrom}px`);
+    }
+
+    const t0 = performance.now();
+    const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
+
+    const step = (now: number) => {
+      const t = Math.min(1, (now - t0) / duration);
+      const e = easeOutCubic(t);
+      // Drive the zoom by the CSS variable only — the whole canvas reflows from
+      // calc(var(--ppd) * …) with no React render. State is committed once at the
+      // end so subsequent interaction (zoom buttons, drag) stays in sync.
+      if (canvas) canvas.style.setProperty('--ppd', `${fromPx + (targetPx - fromPx) * e}px`);
+      const live = timelineScrollRef.current;
+      if (live) live.scrollLeft = fromScroll + (targetScroll - fromScroll) * e;
+      if (drawer && widthFrom !== null) {
+        drawer.style.setProperty('--drawer-w', `${widthFrom + (DRAWER_WIDTH - widthFrom) * e}px`);
+      }
+      if (t < 1) {
+        zoomAnimRef.current = requestAnimationFrame(step);
+      } else {
+        zoomAnimRef.current = null;
+        setPxPerDay(targetPx);
+        // Hand the width back to the default (CSS var fallback = full width).
+        if (drawer && widthFrom !== null) drawer.style.removeProperty('--drawer-w');
+      }
+    };
+    zoomAnimRef.current = requestAnimationFrame(step);
+  };
+
+  // Select a quest, open the edit drawer, and queue a zoom-to-quest animation.
+  // The zoom is stashed and run from a layout effect (once the drawer has
+  // mounted) so we measure against the final, drawer-shrunken canvas width.
+  const openGoal = (g: Goal) => {
+    const wasOpen = isDrawerOpen;
+    setSelectedItemId({ type: 'goal', id: g.id });
+    setIsDrawerOpen(true);
+
+    const el = timelineScrollRef.current;
+    const start = parseLocalDate(g.startDate);
+    const end = parseLocalDate(g.endDate);
+    if (!el || isNaN(start.getTime()) || isNaN(end.getTime())) return;
+
+    const startDay = startOfDay(start);
+    const spanDays = Math.max(1, diffDays(startOfDay(end), startDay));
+    // On desktop, opening the drawer shrinks the canvas by DRAWER_WIDTH. Measure
+    // against that final width so the quest still centers; if the drawer is
+    // already open the current width is already final.
+    const isDesktop = window.matchMedia(MD_BREAKPOINT).matches;
+    const animateWidth = isDesktop && !wasOpen;
+    const finalW = animateWidth ? Math.max(1, el.clientWidth - DRAWER_WIDTH) : el.clientWidth;
+
+    const targetPx = Math.max(10, Math.min(200, (finalW * 0.7) / spanDays));
+    const startPx = diffDays(startDay, startOfDay(timelineStart)) * targetPx;
+    const center = startPx + (spanDays * targetPx) / 2;
+    const targetScroll = Math.max(0, center - finalW / 2);
+    pendingZoomRef.current = { targetPx, targetScroll, animateWidth };
+  };
+
+  // Run the queued quest zoom once the drawer has committed to the DOM. Using a
+  // layout effect (before paint) lets us start the drawer at width 0 with no
+  // flash of the full-width drawer first.
+  useLayoutEffect(() => {
+    const pending = pendingZoomRef.current;
+    if (!pending) return;
+    pendingZoomRef.current = null;
+    animateTimeline(pending.targetPx, pending.targetScroll, 350, pending.animateWidth);
+  }, [selectedItemId, isDrawerOpen]);
 
   // Sync vertical scroll between sidebar and timeline
   const handleSidebarScroll = () => {
@@ -985,9 +1143,8 @@ export default function App() {
       const month = d.getMonth();
       if (month !== currentMonth) {
         currentMonth = month;
-        const left = i * pxPerDay;
         months.push(
-          <div key={`month-${i}`} className="absolute top-0 text-xs font-bold text-slate-400 uppercase tracking-wider border-l border-slate-300 pl-2 h-full flex items-center" style={{ left: `${left}px` }}>
+          <div key={`month-${i}`} className="absolute top-0 text-xs font-bold text-slate-400 uppercase tracking-wider border-l border-slate-300 pl-2 h-full flex items-center" style={{ left: ppx(i) }}>
             {d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
           </div>
         );
@@ -996,16 +1153,25 @@ export default function App() {
     return months;
   };
 
+  // Day grid + weekend shading drawn as two CSS repeating gradients on a single
+  // element, instead of one div per day. This keeps the canvas cheap to repaint
+  // every frame while zooming (the previous per-day divs — hundreds of nodes —
+  // made the zoom animation stutter).
   const renderGrid = () => {
-    const lines = [];
-    for (let i = 0; i < timelineDays; i++) {
-      const d = addDays(timelineStart, i);
-      const isWeekend = d.getDay() === 0 || d.getDay() === 6;
-      lines.push(
-        <div key={i} className={`absolute top-0 bottom-0 border-r border-slate-100 box-border ${isWeekend ? 'bg-slate-50/50' : ''}`} style={{ left: i * pxPerDay, width: pxPerDay }} />
-      );
-    }
-    return lines;
+    // Shift the weekend band so it lands on the real Saturday/Sunday columns.
+    const offsetToSat = (6 - startOfDay(timelineStart).getDay() + 7) % 7;
+    const v = `var(--ppd, ${DEFAULT_PX_PER_DAY}px)`;
+    const dayLines = `repeating-linear-gradient(to right, transparent 0, transparent calc(${v} - 1px), #f1f5f9 calc(${v} - 1px), #f1f5f9 ${v})`;
+    const weekend = `repeating-linear-gradient(to right, rgba(248,250,252,0.5) 0, rgba(248,250,252,0.5) calc(${v} * 2), transparent calc(${v} * 2), transparent calc(${v} * 7))`;
+    return (
+      <div
+        className="absolute inset-0 pointer-events-none"
+        style={{
+          backgroundImage: `${weekend}, ${dayLines}`,
+          backgroundPosition: `calc(${v} * ${offsetToSat}) 0, 0 0`,
+        }}
+      />
+    );
   };
 
   // -- Action Handlers --
@@ -1328,15 +1494,16 @@ export default function App() {
           
           <div className="flex-1 overflow-y-auto overflow-x-hidden bg-slate-50 no-scrollbar" ref={sidebarScrollRef} onScroll={handleSidebarScroll}>
                <div className="py-2">
-                 {timelineRows.map((row) => (
-                   <div 
-                     key={`${row.type}-${row.id}`} 
+                 {timelineRows.map((row) => {
+                   const isRowSelected = selectedItemId?.type === row.type && selectedItemId.id === row.id;
+                   return (
+                   <div
+                     key={`${row.type}-${row.id}`}
                      style={{ height: ROW_HEIGHT }}
-                     className={`flex items-center px-4 hover:bg-white/50 transition-colors cursor-pointer border-b border-transparent hover:border-slate-100 group ${row.type === 'goal' ? 'mt-4 first:mt-0' : ''}`}
+                     className={`flex items-center px-4 transition-colors cursor-pointer border-b group ${row.type === 'goal' ? 'mt-4 first:mt-0' : ''} ${isRowSelected ? 'bg-indigo-50 border-indigo-100' : 'border-transparent hover:bg-white/50 hover:border-slate-100'}`}
                      onClick={() => {
                        if (row.type === 'goal') {
-                         setSelectedItemId({type: 'goal', id: row.id});
-                         setIsDrawerOpen(true);
+                         openGoal(row.data as Goal);
                        } else if (row.type === 'subtask') {
                          setSelectedItemId({type: 'subtask', id: row.id, parentId: row.parentId});
                          setIsDrawerOpen(true);
@@ -1406,7 +1573,8 @@ export default function App() {
                         </div>
                       ) : null}
                    </div>
-                 ))}
+                   );
+                 })}
                  <div className="h-32" />
                </div>
           </div>
@@ -1536,15 +1704,15 @@ export default function App() {
           <div className="flex-1 overflow-auto custom-scrollbar relative" ref={timelineScrollRef} onScroll={handleTimelineScroll}>
              
              {/* Unified Content Wrapper - Forces width for both header and body */}
-             <div className="min-w-full relative min-h-full flex flex-col" style={{ width: timelineDays * pxPerDay }}>
+             <div ref={canvasContentRef} className="min-w-full relative min-h-full flex flex-col" style={{ width: ppx(timelineDays) }}>
                 
                 {/* Sticky Header */}
                 <div className="sticky top-0 z-30 bg-white border-b border-slate-200 h-28 shrink-0 shadow-sm">
                    <div className="absolute inset-0 overflow-hidden">
                        <div className="h-16 border-b border-slate-100 bg-slate-50/30 relative">
                          {unifiedMilestones.map((m, idx) => {
-                           const left = dateToPxCentered(m.dateObj);
-                           const topPos = MILESTONE_TOP_POSITION; 
+                           const left = ppx(dayOffsetOf(m.dateObj) + 0.5);
+                           const topPos = MILESTONE_TOP_POSITION;
                            return (
                              <div 
                                 key={m.id}
@@ -1559,7 +1727,7 @@ export default function App() {
                                   setIsDrawerOpen(true);
                                 }}
                                 className="absolute flex flex-col items-center group cursor-pointer z-30 hover:z-40"
-                                style={{ left: `${left}px`, top: `${topPos}px`, transform: 'translateX(-50%)' }}
+                                style={{ left, top: `${topPos}px`, transform: 'translateX(-50%)' }}
                              >
                                <div className="w-3 h-3 rotate-45 border-2 border-white shadow-md group-hover:scale-125 transition-transform mb-1" style={{ backgroundColor: m.displayColor }} />
                                <span className="text-[10px] font-bold text-slate-600 whitespace-nowrap px-1.5 py-0.5 rounded bg-white/80 backdrop-blur-sm border border-slate-100 shadow-sm opacity-90 group-hover:opacity-100">
@@ -1570,7 +1738,7 @@ export default function App() {
                          })}
                          
                          {/* TODAY Marker in Header */}
-                         <div className="absolute top-0 bottom-0 z-20 pointer-events-none" style={{ left: todayPx }}>
+                         <div className="absolute top-0 bottom-0 z-20 pointer-events-none" style={{ left: ppx(todayOffset) }}>
                             <div className="absolute left-0 top-1 -translate-x-1/2 bg-indigo-600 text-white text-[9px] font-bold px-1 py-0.5 rounded-sm shadow-sm">TODAY</div>
                              <div className="absolute inset-y-0 left-0 border-l-2 border-dotted border-indigo-400/60" style={{ top: '24px' }} />
                          </div>
@@ -1583,7 +1751,7 @@ export default function App() {
                 {/* Timeline Body */}
                 <div className="relative flex-1 pb-32 pt-2">
                    {renderGrid()}
-                   <div className="absolute top-0 bottom-0 z-0 pointer-events-none" style={{ left: todayPx }}>
+                   <div className="absolute top-0 bottom-0 z-0 pointer-events-none" style={{ left: ppx(todayOffset) }}>
                       <div className="absolute inset-y-0 left-0 border-l-2 border-dotted border-indigo-400/60" />
                    </div>
 
@@ -1595,20 +1763,29 @@ export default function App() {
                              {isGoal ? (
                                 (() => {
                                   const g = row.data as Goal;
-                                  const startPx = dateToPx(g.startDate);
-                                  const endPx = dateToPx(g.endDate);
-                                  const width = Math.max(endPx - startPx, pxPerDay);
+                                  const startOffset = dayOffsetOf(g.startDate);
+                                  const spanDays = Math.max(dayOffsetOf(g.endDate) - startOffset, 1);
                                   const isMoving = dragState?.type === 'goal-move' && dragState.itemId === g.id;
+                                  const isSelected = selectedItemId?.type === 'goal' && selectedItemId.id === g.id;
                                   return (
                                     <div
-                                      className="h-9 absolute top-1.5 rounded-md shadow-sm flex items-center px-3 cursor-move select-none ring-1 ring-transparent hover:ring-black/5 transition-all active:ring-2 active:ring-offset-1 z-10"
-                                      style={{ left: startPx, width, backgroundColor: g.color + '20', borderColor: g.color, borderWidth: '1px', borderStyle: 'solid', color: g.color }}
+                                      className={`h-9 absolute top-1.5 rounded-md flex items-center px-3 cursor-move select-none transition-shadow ${isSelected ? 'z-20' : 'shadow-sm ring-1 ring-transparent hover:ring-black/5 active:ring-2 active:ring-offset-1 z-10'}`}
+                                      style={{
+                                        left: ppx(startOffset),
+                                        width: ppx(spanDays),
+                                        backgroundColor: g.color + '20',
+                                        borderColor: g.color,
+                                        borderWidth: '1px',
+                                        borderStyle: 'solid',
+                                        color: g.color,
+                                        ...(isSelected ? { boxShadow: `0 0 0 2px #fff, 0 0 0 3px ${g.color}` } : {}),
+                                      }}
                                       onMouseDown={(e) => {
                                          if ((e.target as HTMLElement).classList.contains('resize-handle')) return;
                                          e.preventDefault();
                                          setDragState({ type: 'goal-move', itemId: g.id, startX: e.clientX, originalData: {...g} });
                                       }}
-                                      onClick={() => { setSelectedItemId({type: 'goal', id: g.id}); setIsDrawerOpen(true); }}
+                                      onClick={() => openGoal(g)}
                                     >
                                        {isMoving && (
                                          <div className="absolute -top-9 left-1/2 -translate-x-1/2 z-50 whitespace-nowrap rounded-md bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 shadow-lg ring-1 ring-black/10 pointer-events-none">
@@ -1626,12 +1803,13 @@ export default function App() {
                                   const s = row.data as Subtask;
                                   const g = data.goals.find(goal => goal.id === row.parentId);
                                   if (!g) return null;
-                                  const startPx = dateToPx(g.startDate) + (s.startOffsetDays * pxPerDay);
-                                  const width = s.durationDays * pxPerDay;
+                                  const startOffset = dayOffsetOf(g.startDate) + s.startOffsetDays;
+                                  const spanDays = Math.max(s.durationDays, 1);
+                                  const isSelected = selectedItemId?.type === 'subtask' && selectedItemId.id === s.id;
                                   return (
-                                    <div 
-                                      className="h-7 absolute top-2.5 rounded border shadow-sm flex items-center px-2 text-[11px] text-slate-600 cursor-pointer transition-all hover:border-indigo-300 hover:shadow-md bg-white z-10"
-                                      style={{ left: startPx, width: Math.max(width, pxPerDay), borderColor: s.status === Status.DONE ? '#10b981' : '#e2e8f0', opacity: s.status === Status.DONE ? 0.6 : 1 }}
+                                    <div
+                                      className={`h-7 absolute top-2.5 rounded border flex items-center px-2 text-[11px] text-slate-600 cursor-pointer transition-[border-color,box-shadow] bg-white ${isSelected ? 'z-20' : 'shadow-sm hover:border-indigo-300 hover:shadow-md z-10'}`}
+                                      style={{ left: ppx(startOffset), width: ppx(spanDays), borderColor: s.status === Status.DONE ? '#10b981' : '#e2e8f0', opacity: s.status === Status.DONE ? 0.6 : 1, ...(isSelected ? { boxShadow: `0 0 0 2px #fff, 0 0 0 3px ${g.color}` } : {}) }}
                                       onMouseDown={(e) => {
                                           if ((e.target as HTMLElement).classList.contains('resize-handle')) return;
                                           e.preventDefault();
@@ -1659,12 +1837,12 @@ export default function App() {
 
         {/* --- Edit Drawer / Bottom Sheet --- */}
         {isDrawerOpen && (
-          <div className="w-full md:w-80 h-[50vh] md:h-full bg-white shadow-2xl z-50 md:border-l border-t md:border-t-0 border-slate-200 flex flex-col overflow-y-auto absolute bottom-0 md:bottom-auto right-0 left-0 md:left-auto md:right-0 md:top-0 rounded-t-2xl md:rounded-none animate-slide-in-bottom md:animate-slide-in-right">
-             <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
+          <div ref={drawerRef} className="w-full drawer-animated md:flex-shrink-0 h-[50vh] md:h-full bg-white shadow-2xl z-50 md:border-l border-t md:border-t-0 border-slate-200 flex flex-col overflow-y-auto md:overflow-x-hidden absolute md:static bottom-0 right-0 left-0 rounded-t-2xl md:rounded-none animate-slide-in-bottom md:animate-drawer-in">
+             <div className="w-full md:w-80 p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
                 <h2 className="font-bold text-slate-800">Edit {selectedItemId?.type}</h2>
                 <button onClick={() => setIsDrawerOpen(false)} className="p-1 hover:bg-slate-200 rounded-full"><X className="w-5 h-5 text-slate-500" /></button>
              </div>
-             <div className="p-5 space-y-6">
+             <div className="w-full md:w-80 p-5 space-y-6">
                {selectedItemId?.type === 'goal' && (() => {
                  const goal = data.goals.find(g => g.id === selectedItemId.id);
                  if (!goal) return null;
