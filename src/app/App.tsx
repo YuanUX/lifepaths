@@ -120,7 +120,13 @@ export default function App() {
   const isPreview = typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('preview') === '1';
 
   // -- State --
-  const [session, setSession] = useState<{ user: { id: string }; access_token: string } | null>(null);
+  // Seed the session synchronously from the stored token so the very first paint
+  // already knows the user is logged in — this lets us skip the marketing page
+  // for returning users instead of flashing it before redirecting to the canvas.
+  const [session, setSession] = useState<{ user: { id: string }; access_token: string } | null>(() => {
+    const s = WorkersClient.auth.getSession().data.session;
+    return s ? { user: s.user, access_token: s.access_token } : null;
+  });
   const [isLoading, setIsLoading] = useState(true);
   const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
   const [authEmail, setAuthEmail] = useState('');
@@ -1376,6 +1382,17 @@ export default function App() {
 
   // --- Landing Page (with login modal over a blurred backdrop) ---
   if (!onCanvasRoute && !isPreview) {
+    // Returning, logged-in visitors are about to be redirected to the canvas
+    // (see the routing effect). Show a quiet splash instead of flashing the
+    // marketing page first. Only on the initial route — once they've landed
+    // here intentionally (e.g. clicked the logo) the landing renders normally.
+    if (session && !didInitialRouteRef.current && location.pathname === '/') {
+      return (
+        <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-indigo-50 via-white to-slate-50">
+          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-indigo-600 text-2xl font-bold text-white shadow-lg animate-pulse">L</div>
+        </div>
+      );
+    }
     return (
       <div className="relative flex min-h-screen flex-col overflow-hidden bg-gradient-to-br from-indigo-50 via-white to-slate-50">
         {/* Decorative background blobs */}
