@@ -44,6 +44,9 @@ const DEFAULT_PX_PER_DAY = 15;
 // Desktop edit-drawer width (Tailwind md breakpoint + w-80). Used to animate the
 // drawer open in lockstep with the zoom and to keep zoom centering accurate.
 const DRAWER_WIDTH = 320;
+// A press must move at least this many pixels before it counts as a drag, so a
+// click with a little mouse jitter doesn't accidentally move an item.
+const DRAG_THRESHOLD = 5;
 const MD_BREAKPOINT = '(min-width: 48rem)';
 const MILESTONE_TOP_POSITION = 16;
 // How many days of empty space to keep before the earliest / after the latest item,
@@ -131,6 +134,8 @@ export default function App() {
 
   const [selectedItemId, setSelectedItemId] = useState<{type: 'goal' | 'subtask' | 'milestone', id: string, parentId?: string} | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  // Inline title editing for a subtask bar (entered via double-click).
+  const [editingSubtask, setEditingSubtask] = useState<{ id: string; parentId: string; value: string } | null>(null);
   const [dragState, setDragState] = useState<DragState | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   // Category for the create modal. Auto-inferred from the title keywords until
@@ -183,6 +188,9 @@ export default function App() {
   const didAutoFitRef = useRef(false);
   // Holds the in-flight requestAnimationFrame id for the zoom-to-quest tween.
   const zoomAnimRef = useRef<number | null>(null);
+  // Distinguishes a single click (open drawer) from a double click (inline edit)
+  // on a subtask bar by deferring the single-click action briefly.
+  const subtaskClickTimerRef = useRef<number | null>(null);
   // Whether we've done the one-time "logged-in users land on the canvas" redirect.
   const didInitialRouteRef = useRef(false);
 
@@ -472,7 +480,26 @@ export default function App() {
 
 
   // -- Drag Logic with Persistence --
-  
+
+  // Arm a drag but don't actually start it until the pointer crosses
+  // DRAG_THRESHOLD px. A plain click (with minor jitter) stays a click.
+  const startDrag = (payload: DragState, e: React.MouseEvent) => {
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const onMove = (ev: MouseEvent) => {
+      if (Math.abs(ev.clientX - startX) >= DRAG_THRESHOLD || Math.abs(ev.clientY - startY) >= DRAG_THRESHOLD) {
+        cleanup();
+        setDragState(payload);
+      }
+    };
+    const cleanup = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', cleanup);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', cleanup);
+  };
+
   // Handle Mouse Move (Visual Update Only)
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
@@ -774,6 +801,22 @@ export default function App() {
       if (newSet.has(goalId)) newSet.delete(goalId);
       else newSet.add(goalId);
       return newSet;
+    });
+  };
+
+  // Save (or discard) an in-progress inline subtask title edit.
+  const commitSubtaskEdit = () => {
+    setEditingSubtask(prev => {
+      if (!prev) return null;
+      const trimmed = prev.value.trim();
+      const goal = data.goals.find(g => g.id === prev.parentId);
+      const task = goal?.subtasks.find(t => t.id === prev.id);
+      if (task && trimmed && trimmed !== task.title) {
+        const updated = { ...task, title: trimmed };
+        setData(d => ({ ...d, goals: d.goals.map(g => g.id === prev.parentId ? { ...g, subtasks: g.subtasks.map(t => t.id === prev.id ? updated : t) } : g) }));
+        if (!isDemoMode) WorkersDataService.updateSubtask(updated);
+      }
+      return null;
     });
   };
 
@@ -1719,7 +1762,7 @@ export default function App() {
                                 onMouseDown={(e) => {
                                   e.preventDefault();
                                   const dragType = m.isGlobal ? 'global-milestone-move' : 'milestone-move';
-                                  setDragState({ type: dragType, itemId: m.id, parentId: m.parentId || undefined, startX: e.clientX, originalData: {...m} });
+                                  startDrag({ type: dragType, itemId: m.id, parentId: m.parentId || undefined, startX: e.clientX, originalData: {...m} }, e);
                                 }}
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -1783,7 +1826,7 @@ export default function App() {
                                       onMouseDown={(e) => {
                                          if ((e.target as HTMLElement).classList.contains('resize-handle')) return;
                                          e.preventDefault();
-                                         setDragState({ type: 'goal-move', itemId: g.id, startX: e.clientX, originalData: {...g} });
+                                         startDrag({ type: 'goal-move', itemId: g.id, startX: e.clientX, originalData: {...g} }, e);
                                       }}
                                       onClick={() => openGoal(g)}
                                     >
@@ -1792,9 +1835,9 @@ export default function App() {
                                            {formatTooltipDate(g.startDate)} <span className="text-slate-400">→</span> {formatTooltipDate(g.endDate)}
                                          </div>
                                        )}
-                                       <Handle type="start" onDragStart={(e) => setDragState({ type: 'goal-resize-start', itemId: g.id, startX: e.clientX, originalData: {...g} })} />
+                                       <Handle type="start" onDragStart={(e) => startDrag({ type: 'goal-resize-start', itemId: g.id, startX: e.clientX, originalData: {...g} }, e)} />
                                        <span className="text-xs font-bold truncate w-full px-1 select-none">{g.title}</span>
-                                       <Handle type="end" onDragStart={(e) => setDragState({ type: 'goal-resize-end', itemId: g.id, startX: e.clientX, originalData: {...g} })} />
+                                       <Handle type="end" onDragStart={(e) => startDrag({ type: 'goal-resize-end', itemId: g.id, startX: e.clientX, originalData: {...g} }, e)} />
                                     </div>
                                   )
                                 })()
@@ -1805,7 +1848,11 @@ export default function App() {
                                   if (!g) return null;
                                   const startOffset = dayOffsetOf(g.startDate) + s.startOffsetDays;
                                   const spanDays = Math.max(s.durationDays, 1);
-                                  const isSelected = selectedItemId?.type === 'subtask' && selectedItemId.id === s.id;
+                                  const isEditing = editingSubtask?.id === s.id;
+                                  const isSelected = isEditing || (selectedItemId?.type === 'subtask' && selectedItemId.id === s.id);
+                                  const isMoving = (dragState?.type === 'subtask-move' || dragState?.type === 'subtask-resize-end') && dragState.itemId === s.id;
+                                  const sStartDate = addDays(parseLocalDate(g.startDate), s.startOffsetDays);
+                                  const sEndDate = addDays(sStartDate, s.durationDays);
                                   return (
                                     <div
                                       className={`h-7 absolute top-2.5 rounded border flex items-center px-2 text-[11px] text-slate-600 cursor-pointer transition-[border-color,box-shadow] bg-white ${isSelected ? 'z-20' : 'shadow-sm hover:border-indigo-300 hover:shadow-md z-10'}`}
@@ -1813,16 +1860,49 @@ export default function App() {
                                       onMouseDown={(e) => {
                                           if ((e.target as HTMLElement).classList.contains('resize-handle')) return;
                                           e.preventDefault();
-                                          setDragState({ type: 'subtask-move', itemId: s.id, parentId: g.id, startX: e.clientX, originalData: {...s} });
+                                          startDrag({ type: 'subtask-move', itemId: s.id, parentId: g.id, startX: e.clientX, originalData: {...s} }, e);
                                       }}
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        setSelectedItemId({type: 'subtask', id: s.id, parentId: g.id});
-                                        setIsDrawerOpen(true);
+                                        if (editingSubtask?.id === s.id) return;
+                                        // Defer so a double-click (inline edit) can cancel it.
+                                        if (subtaskClickTimerRef.current) window.clearTimeout(subtaskClickTimerRef.current);
+                                        subtaskClickTimerRef.current = window.setTimeout(() => {
+                                          subtaskClickTimerRef.current = null;
+                                          setSelectedItemId({type: 'subtask', id: s.id, parentId: g.id});
+                                          setIsDrawerOpen(true);
+                                        }, 200);
+                                      }}
+                                      onDoubleClick={(e) => {
+                                        e.stopPropagation();
+                                        if (subtaskClickTimerRef.current) { window.clearTimeout(subtaskClickTimerRef.current); subtaskClickTimerRef.current = null; }
+                                        setEditingSubtask({ id: s.id, parentId: g.id, value: s.title });
                                       }}
                                     >
-                                      <span className={`truncate font-medium select-none ${s.status === Status.DONE ? 'line-through' : ''}`}>{s.title}</span>
-                                      <Handle type="end" onDragStart={(e) => setDragState({ type: 'subtask-resize-end', itemId: s.id, parentId: g.id, startX: e.clientX, originalData: {...s} })} />
+                                      {isMoving && (
+                                        <div className="absolute -top-9 left-1/2 -translate-x-1/2 z-50 whitespace-nowrap rounded-md bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 shadow-lg ring-1 ring-black/10 pointer-events-none">
+                                          {formatTooltipDate(formatDate(sStartDate))} <span className="text-slate-400">→</span> {formatTooltipDate(formatDate(sEndDate))}
+                                        </div>
+                                      )}
+                                      {editingSubtask?.id === s.id ? (
+                                        <input
+                                          autoFocus
+                                          value={editingSubtask.value}
+                                          onChange={(e) => setEditingSubtask(prev => prev && { ...prev, value: e.target.value })}
+                                          onFocus={(e) => e.target.select()}
+                                          onMouseDown={(e) => e.stopPropagation()}
+                                          onClick={(e) => e.stopPropagation()}
+                                          onBlur={commitSubtaskEdit}
+                                          onKeyDown={(e) => {
+                                            if (e.key === 'Enter') { e.preventDefault(); commitSubtaskEdit(); }
+                                            else if (e.key === 'Escape') { e.preventDefault(); setEditingSubtask(null); }
+                                          }}
+                                          className="w-full min-w-0 bg-transparent outline-none text-[11px] font-medium text-slate-700"
+                                        />
+                                      ) : (
+                                        <span className={`truncate font-medium select-none ${s.status === Status.DONE ? 'line-through' : ''}`}>{s.title}</span>
+                                      )}
+                                      <Handle type="end" onDragStart={(e) => startDrag({ type: 'subtask-resize-end', itemId: s.id, parentId: g.id, startX: e.clientX, originalData: {...s} }, e)} />
                                     </div>
                                   )
                                 })()
@@ -1898,14 +1978,9 @@ export default function App() {
                           {Object.values(Status).map(s => <option key={s} value={s}>{s}</option>)}
                         </select>
                      </div>
-                      <GoalNotes 
-                        goal={goal} 
-                        onUpdate={(updated) => setData({...data, goals: data.goals.map(g => g.id === goal.id ? updated : g)})} 
-                        isDemoMode={isDemoMode}
-                      />
 
                       {/* Subtasks */}
-                      <div className="border-t border-slate-200 pt-4">
+                      <div>
                         <div className="flex items-center justify-between mb-3">
                           <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Subtasks ({goal.subtasks.length})</label>
                           <button
@@ -1943,7 +2018,7 @@ export default function App() {
                       </div>
 
                       {/* Milestones */}
-                      <div className="border-t border-slate-200 pt-4">
+                      <div>
                         <div className="flex items-center justify-between mb-3">
                           <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Milestones ({goal.milestones.length})</label>
                           <button
@@ -1978,8 +2053,14 @@ export default function App() {
                         </div>
                       </div>
 
+                      <GoalNotes
+                        goal={goal}
+                        onUpdate={(updated) => setData({...data, goals: data.goals.map(g => g.id === goal.id ? updated : g)})}
+                        isDemoMode={isDemoMode}
+                      />
+
                       <div className="border-t border-slate-200 pt-4 mt-2">
-                        <button 
+                        <button
                           className="w-full py-2.5 text-red-600 border border-red-300 rounded-lg hover:bg-red-50 hover:border-red-400 text-sm font-medium flex justify-center items-center gap-2 transition-all"
                           onClick={async (e) => {
                            e.stopPropagation();
